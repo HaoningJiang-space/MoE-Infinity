@@ -1,11 +1,24 @@
 from typing import Dict
 
-import nvtx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from moe_infinity.kernel.router import launch_fused_softmax_topk_nobias
+from moe_infinity.models.policy_utils import drive_expert_policy
+
+try:
+    import nvtx
+except ImportError:
+    class _NvtxStub:
+        @staticmethod
+        def annotate(*args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    nvtx = _NvtxStub()
 
 
 class DeepseekMoEGate(nn.Module):
@@ -125,6 +138,13 @@ class DeepseekMoEBlock(nn.Module):
         )
         batch_size, sequence_length, hidden_dim = identity.shape
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        selected_experts = torch.topk(
+            routing_weight, self.num_experts_per_tok, dim=-1
+        ).indices
+        expert_index = selected_experts.reshape(
+            batch_size, sequence_length, self.num_experts_per_tok
+        )
+        drive_expert_policy(self, expert_index)
 
         self.expert_executor.dispatch_local(
             self.layer_id, hidden_states, routing_mask, routing_weight

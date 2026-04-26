@@ -7,6 +7,7 @@
 
 #include <torch/extension.h>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -48,22 +49,7 @@ class ExpertDispatcher : public base::noncopyable {
  public:
   explicit ExpertDispatcher(int num_experts, int num_layers, int dtype,
                             int expert_type, int num_threads = 1);
-  ~ExpertDispatcher() {
-    main_thread_stop_flag_.store(true);
-    for (auto& thread : threads_) {
-      thread->join();
-    }
-
-    // for (auto& stream : fetch_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
-    for (auto& stream : exec_streams_) {
-      cudaStreamDestroy(stream);
-    }
-    // for (auto& stream : out_streams_) {
-    //   cudaStreamDestroy(stream);
-    // }
-  }
+  ~ExpertDispatcher();
 
   void SetInputs(const torch::Tensor& hidden_states,
                  const torch::Tensor& router_mask,
@@ -80,6 +66,8 @@ class ExpertDispatcher : public base::noncopyable {
   void SetExpectedQueue(int expected_pending = 0) {
     pending_.store(expected_pending);
   }
+  std::vector<std::uint64_t> GetRuntimeStats() const;
+  void ResetRuntimeStats();
 
   std::vector<CallResult> WaitExpert() { return Wait(); }
   torch::Tensor WaitHiddenStates();
@@ -88,6 +76,7 @@ class ExpertDispatcher : public base::noncopyable {
   void Enqueue(CallArgs& args);
   std::vector<CallResult> Wait();
   void Start() { start_ = true; }
+  void ShutdownQueues();
 
   void GPUFetchFunc(int gpu_id);
   void GPUExecFunc(int gpu_id);
@@ -114,6 +103,10 @@ class ExpertDispatcher : public base::noncopyable {
   int dtype_;
   int num_experts_;
   std::atomic<bool> main_thread_stop_flag_;
+  std::atomic<std::uint64_t> enqueue_count_{0};
+  std::atomic<std::uint64_t> busy_wait_count_{0};
+  std::atomic<std::uint64_t> busy_wait_total_wait_us_{0};
+  std::atomic<std::uint64_t> busy_wait_max_wait_us_{0};
 
   std::atomic<size_t> pending_;
 

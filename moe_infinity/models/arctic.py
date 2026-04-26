@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from moe_infinity.models.policy_utils import drive_expert_policy
 from moe_infinity.utils import ArcherConfig
 
 from .modeling_arctic import ArcticConfig, ArcticMLP
@@ -47,14 +48,7 @@ class SyncArcticMoeBlock(nn.Module):
         expert_index = selected_experts.reshape(
             batch_size, sequence_length, self.top_k
         )
-        for i in range(batch_size):
-            seq_id = self.seq_id_list[i]
-            expert_matrix = self.expert_predictor.predict(
-                seq_id, expert_index[i], self.layer_id
-            )
-            self.expert_prefetcher.prefetch_experts(
-                self.layer_id, expert_matrix
-            )
+        drive_expert_policy(self, expert_index)
 
         final_hidden_states = torch.zeros(
             (batch_size * sequence_length, hidden_dim),

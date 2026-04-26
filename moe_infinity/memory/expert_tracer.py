@@ -27,23 +27,36 @@ class ExpertTracer:
             parse_moe_param(config)
         )
         self.capacity = capacity
+        self.trace_device = torch.device(
+            "cuda:0" if torch.cuda.is_available() else "cpu"
+        )
 
         self.trace = {}
 
         self.trace_collection = torch.zeros(
-            (capacity, self.num_layers, self.num_experts), device="cuda:0"
+            (capacity, self.num_layers, self.num_experts),
+            device=self.trace_device,
+            dtype=torch.float32,
         )
+        self.persistent_capacity = 0
         self.collection_access = np.zeros((capacity,))
 
         self.cos = nn.CosineSimilarity(dim=2, eps=1e-6)
 
     def load_trace(self, trace: Union[os.PathLike, np.ndarray]):
         if isinstance(trace, os.PathLike):
-            self.trace_collection = torch.from_numpy(
-                np.load(trace, allow_pickle=False)
+            trace = np.load(trace, allow_pickle=False)
+
+        if isinstance(trace, np.ndarray):
+            self.trace_collection = torch.as_tensor(
+                trace, dtype=torch.float32, device=self.trace_device
             )
-        elif isinstance(trace, np.ndarray):
-            self.trace_collection = trace
+        elif isinstance(trace, torch.Tensor):
+            self.trace_collection = torch.as_tensor(
+                trace, dtype=torch.float32, device=self.trace_device
+            )
+        else:
+            raise TypeError(f"Unsupported trace type: {type(trace)!r}")
 
         self.persistent_capacity = self.trace_collection.shape[0]
         assert self.persistent_capacity <= self.capacity, (
@@ -59,12 +72,16 @@ class ExpertTracer:
         return seq_id
 
     def finish_entry(self, seq_id):
-        trace_sum = np.sum(self.trace_collection, axis=(1, 2))
+        trace_sum = torch.sum(self.trace_collection, dim=(1, 2)).cpu().numpy()
 
         if np.any(trace_sum == 0):
             # find the first zero entry
             idx = np.argwhere(trace_sum == 0)[0][0]
-            self.trace_collection[idx] = self.trace[seq_id].matrix
+            self.trace_collection[idx] = torch.as_tensor(
+                self.trace[seq_id].matrix,
+                dtype=self.trace_collection.dtype,
+                device=self.trace_device,
+            )
             self.collection_access[idx] = 1
         else:
             # find the first entry after self.persistent_capacity that has the least access
@@ -72,8 +89,15 @@ class ExpertTracer:
             collection_access_copy[: self.persistent_capacity] = 1e9
 
             idx = np.argmin(collection_access_copy)
-            self.trace_collection[idx] = self.trace[seq_id].matrix
+            self.trace_collection[idx] = torch.as_tensor(
+                self.trace[seq_id].matrix,
+                dtype=self.trace_collection.dtype,
+                device=self.trace_device,
+            )
             self.collection_access[idx] = 1
+
+    def remove_entry(self, seq_id):
+        self.trace.pop(seq_id, None)
 
     def update_entry(self, seq_id, expert_list, layer_idx):
         expert_counter = Counter(expert_list.flatten().tolist())
@@ -101,7 +125,7 @@ class ExpertTracer:
             trace_collection_copy, dim=2, keepdims=True
         )
 
-        matrix_copy = torch.from_numpy(matrix.copy()).to("cuda:0")
+        matrix_copy = torch.from_numpy(matrix.copy()).to(self.trace_device)
         matrix_copy /= torch.sum(matrix_copy, dim=1, keepdims=True)
         replicated_matrix_copy = torch.concat(
             [matrix_copy[None, ...]] * self.capacity, dim=0

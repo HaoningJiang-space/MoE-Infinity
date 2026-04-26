@@ -1,0 +1,32 @@
+{"request_id":"stationary-001","tag":"coding","messages":[{"role":"user","content":"Write a one-line Python expression that reverses a string. Answer with code only."}]}
+{"request_id":"stationary-002","tag":"coding","messages":[{"role":"user","content":"Write a Python list comprehension that squares numbers from 0 to 9. Answer with code only."}]}
+{"request_id":"stationary-003","tag":"coding","messages":[{"role":"user","content":"Write a Python function call that sorts a list named nums in descending order without modifying the original list. Answer with code only."}]}
+{"request_id":"stationary-004","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that removes duplicates from a list named items while preserving order. Answer with code only."}]}
+{"request_id":"stationary-005","tag":"coding","messages":[{"role":"user","content":"Write a Python line that reads a UTF-8 text file into a string variable named text. Answer with code only."}]}
+{"request_id":"stationary-006","tag":"coding","messages":[{"role":"user","content":"Write a Python line that joins a list named parts with commas. Answer with code only."}]}
+{"request_id":"stationary-007","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that gets the file extension from a path variable named p using pathlib. Answer with code only."}]}
+{"request_id":"stationary-008","tag":"coding","messages":[{"role":"user","content":"Write a Python statement that counts words in a string variable named s using split. Answer with code only."}]}
+{"request_id":"stationary-009","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that checks whether every value in a list named vals is positive. Answer with code only."}]}
+{"request_id":"stationary-010","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that gets the top 3 largest values from a list named scores using heapq. Answer with code only."}]}
+{"request_id":"stationary-011","tag":"coding","messages":[{"role":"user","content":"Write a Python line that converts a list of pairs named pairs into a dictionary. Answer with code only."}]}
+{"request_id":"stationary-012","tag":"coding","messages":[{"role":"user","content":"Write a Python line that strips leading and trailing whitespace from a string variable named name. Answer with code only."}]}
+{"request_id":"stationary-013","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that returns the intersection of sets a and b. Answer with code only."}]}
+{"request_id":"stationary-014","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that formats an integer variable n as hexadecimal with a 0x prefix. Answer with code only."}]}
+{"request_id":"stationary-015","tag":"coding","messages":[{"role":"user","content":"Write a Python line that groups a pandas DataFrame df by column user_id and counts rows. Answer with code only."}]}
+{"request_id":"stationary-016","tag":"coding","messages":[{"role":"user","content":"Write a SQL query that counts orders per customer_id from a table named orders. Answer with SQL only."}]}
+{"request_id":"stationary-017","tag":"coding","messages":[{"role":"user","content":"Write a SQL query that selects the latest created_at row for each device_id from a table named events. Answer with SQL only."}]}
+{"request_id":"stationary-018","tag":"coding","messages":[{"role":"user","content":"Write a Bash command that lists only regular files in the current directory sorted by size descending. Answer with code only."}]}
+{"request_id":"stationary-019","tag":"coding","messages":[{"role":"user","content":"Write a Bash command that finds all .log files under /var/tmp and deletes them. Answer with code only."}]}
+{"request_id":"stationary-020","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that gets the current UTC timestamp as an ISO 8601 string. Answer with code only."}]}
+{"request_id":"stationary-021","tag":"coding","messages":[{"role":"user","content":"Write a Python line that parses a JSON string variable raw into an object. Answer with code only."}]}
+{"request_id":"stationary-022","tag":"coding","messages":[{"role":"user","content":"Write a Python line that serializes an object named payload to compact JSON. Answer with code only."}]}
+{"request_id":"stationary-023","tag":"coding","messages":[{"role":"user","content":"Write a Python line that computes the mean of a list named xs using statistics. Answer with code only."}]}
+{"request_id":"stationary-024","tag":"coding","messages":[{"role":"user","content":"Write a Python line that creates a Counter from a list named tokens. Answer with code only."}]}
+{"request_id":"stationary-025","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that zips lists a and b into a list of tuples. Answer with code only."}]}
+{"request_id":"stationary-026","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that flattens a nested list named rows by one level. Answer with code only."}]}
+{"request_id":"stationary-027","tag":"coding","messages":[{"role":"user","content":"Write a Python line that opens a SQLite database file named app.db and creates a connection variable conn. Answer with code only."}]}
+{"request_id":"stationary-028","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that checks whether a string variable email contains an at sign and a dot. Answer with code only."}]}
+{"request_id":"stationary-029","tag":"coding","messages":[{"role":"user","content":"Write a Python line that reads environment variable HOME with a fallback of an empty string. Answer with code only."}]}
+{"request_id":"stationary-030","tag":"coding","messages":[{"role":"user","content":"Write a Python line that creates a temporary directory using tempfile. Answer with code only."}]}
+{"request_id":"stationary-031","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that slices the last 5 elements from a list named history. Answer with code only."}]}
+{"request_id":"stationary-032","tag":"coding","messages":[{"role":"user","content":"Write a Python line that logs an info message using a logger variable named logger. Answer with code only."}]}

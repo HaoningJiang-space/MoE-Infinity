@@ -14,7 +14,6 @@ from moe_infinity.models import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_deepseek,
 )
-from moe_infinity.models.modeling_arctic import ArcticConfig
 from moe_infinity.runtime import OffloadEngine
 from moe_infinity.utils import ArcherConfig, get_checkpoint_paths
 
@@ -73,6 +72,8 @@ class MoE:
                 )
             config = default_config_path
         if "arctic" in model_name_or_path:
+            from moe_infinity.models.modeling_arctic import ArcticConfig
+
             model_config = ArcticConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=True
             )
@@ -191,9 +192,12 @@ class MoE:
         self._configure_hook(input_ids)
 
         self.model.eval()
-        with torch.no_grad():
-            return self.model.generate(input_ids, **kwargs)
-        self.engine.expert_dispatcher.clear_expert_cache_counts()
+        try:
+            with torch.no_grad():
+                return self.model.generate(input_ids, **kwargs)
+        finally:
+            self.engine.finish_sequences(self.seq_id_list)
+            self.engine.expert_dispatcher.clear_expert_cache_counts()
 
     def forward(self, input_ids: torch.LongTensor, *args, **kwargs) -> Any:
         """
@@ -208,8 +212,10 @@ class MoE:
         """
 
         self._configure_hook(input_ids)
-
-        return self.model(input_ids, *args, **kwargs)
+        try:
+            return self.model(input_ids, *args, **kwargs)
+        finally:
+            self.engine.finish_sequences(self.seq_id_list)
 
     def __call__(self, *args, **kwargs) -> Any:
         """

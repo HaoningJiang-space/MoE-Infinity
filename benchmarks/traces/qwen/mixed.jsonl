@@ -1,0 +1,32 @@
+{"request_id":"mixed-001","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that joins path parts a, b, and c using pathlib. Answer with code only."}]}
+{"request_id":"mixed-002","tag":"math","messages":[{"role":"user","content":"Compute 17 multiplied by 19. Answer with digits only."}]}
+{"request_id":"mixed-003","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The nightly backup failed because the disk was full."}]}
+{"request_id":"mixed-004","tag":"factual","messages":[{"role":"user","content":"What is the capital of Japan? Answer with one word."}]}
+{"request_id":"mixed-005","tag":"coding","messages":[{"role":"user","content":"Write a SQL query that selects rows from users where status is active. Answer with SQL only."}]}
+{"request_id":"mixed-006","tag":"math","messages":[{"role":"user","content":"Compute 144 divided by 12. Answer with digits only."}]}
+{"request_id":"mixed-007","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The API response became faster after the cache warmup completed."}]}
+{"request_id":"mixed-008","tag":"factual","messages":[{"role":"user","content":"Which planet is known as the Red Planet? Answer with one word."}]}
+{"request_id":"mixed-009","tag":"coding","messages":[{"role":"user","content":"Write a Bash command that prints the current working directory. Answer with code only."}]}
+{"request_id":"mixed-010","tag":"math","messages":[{"role":"user","content":"Compute 9 squared plus 7. Answer with digits only."}]}
+{"request_id":"mixed-011","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The migration completed successfully with zero customer-visible errors."}]}
+{"request_id":"mixed-012","tag":"factual","messages":[{"role":"user","content":"What gas do plants absorb from the atmosphere? Answer with one short phrase."}]}
+{"request_id":"mixed-013","tag":"coding","messages":[{"role":"user","content":"Write a Python line that reads CSV file data.csv into a pandas DataFrame df. Answer with code only."}]}
+{"request_id":"mixed-014","tag":"math","messages":[{"role":"user","content":"Compute 81 minus 26. Answer with digits only."}]}
+{"request_id":"mixed-015","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The new dashboard highlights latency regressions by region and model."}]}
+{"request_id":"mixed-016","tag":"factual","messages":[{"role":"user","content":"What is H2O commonly called? Answer with one word."}]}
+{"request_id":"mixed-017","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that checks whether key user_id exists in dict payload. Answer with code only."}]}
+{"request_id":"mixed-018","tag":"math","messages":[{"role":"user","content":"Compute 7 times 8 plus 3. Answer with digits only."}]}
+{"request_id":"mixed-019","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The service was restarted after a configuration rollback."}]}
+{"request_id":"mixed-020","tag":"factual","messages":[{"role":"user","content":"What is the largest ocean on Earth? Answer with a short phrase."}]}
+{"request_id":"mixed-021","tag":"coding","messages":[{"role":"user","content":"Write a Python line that gets the current process id. Answer with code only."}]}
+{"request_id":"mixed-022","tag":"math","messages":[{"role":"user","content":"Compute 125 divided by 5. Answer with digits only."}]}
+{"request_id":"mixed-023","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The issue reproduced only under heavy concurrent uploads."}]}
+{"request_id":"mixed-024","tag":"factual","messages":[{"role":"user","content":"What is the chemical symbol for gold? Answer with letters only."}]}
+{"request_id":"mixed-025","tag":"coding","messages":[{"role":"user","content":"Write a Python expression that returns the length of a string variable text. Answer with code only."}]}
+{"request_id":"mixed-026","tag":"math","messages":[{"role":"user","content":"Compute 50 plus 75. Answer with digits only."}]}
+{"request_id":"mixed-027","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The benchmark isolates GPU runtime effects from server scheduling."}]}
+{"request_id":"mixed-028","tag":"factual","messages":[{"role":"user","content":"Which continent is Egypt in? Answer with one word."}]}
+{"request_id":"mixed-029","tag":"coding","messages":[{"role":"user","content":"Write a Python line that imports defaultdict from collections. Answer with code only."}]}
+{"request_id":"mixed-030","tag":"math","messages":[{"role":"user","content":"Compute 64 divided by 8. Answer with digits only."}]}
+{"request_id":"mixed-031","tag":"summary","messages":[{"role":"user","content":"Summarize this sentence in five words or fewer: The rollout paused automatically after repeated health check failures."}]}
+{"request_id":"mixed-032","tag":"factual","messages":[{"role":"user","content":"What instrument measures temperature? Answer with one word."}]}

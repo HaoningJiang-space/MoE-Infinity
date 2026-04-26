@@ -37,6 +37,12 @@ class ArcherConfig:
     prefetch: bool = field(
         default=False, metadata={"help": "Enable prefetching"}
     )
+    policy_score_only: bool = field(
+        default=False,
+        metadata={
+            "help": "Evaluate offloading policy scoring without issuing prefetch work"
+        },
+    )
     device_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of device memory to use"},
@@ -47,6 +53,38 @@ class ArcherConfig:
     host_memory_ratio: float = field(
         default=0.9,
         metadata={"help": "Ratio of host memory to use"},
+    )
+    offloading_policy: str = field(
+        default="baseline_trace_similarity",
+        metadata={"help": "Offloading policy name"},
+    )
+    historical_library_capacity: int = field(
+        default=256,
+        metadata={"help": "Capacity of reusable historical expert-state library"},
+    )
+    historical_library_metric: str = field(
+        default="cosine",
+        metadata={"help": "Similarity metric for historical library retrieval"},
+    )
+    historical_library_admission: str = field(
+        default="diversity_aware",
+        metadata={"help": "Admission/eviction policy for the historical library"},
+    )
+    historical_library_dedup_threshold: float = field(
+        default=0.995,
+        metadata={"help": "Deduplication similarity threshold for the historical library"},
+    )
+    prefetch_backbone_topk: int = field(
+        default=0,
+        metadata={"help": "Optional per-layer top-k backbone projection for prefetch scores"},
+    )
+    prefetch_future_layers: int = field(
+        default=0,
+        metadata={"help": "Maximum number of future layers to consider for expert prefetch; 0 means unbounded"},
+    )
+    prefetch_max_candidates: int = field(
+        default=0,
+        metadata={"help": "Maximum number of prefetched expert candidates per policy step; 0 means unbounded"},
     )
 
     @classmethod

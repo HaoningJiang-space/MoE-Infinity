@@ -14,22 +14,23 @@ class ExpertPredictor:
     def add_tracer(self, tracer: ExpertTracer):
         self.tracer = tracer
 
-    def predict(self, seq_id, expert_list, layer_idx):
-        self.tracer.update_entry(seq_id, expert_list, layer_idx)
-        current_entry = self.tracer.get_entry(seq_id)
-
-        # start_time = time.time()
-        expert_matrix = self.tracer.find_most_similar(
-            current_entry.matrix, layer_idx
-        )
-        # print("find_most_similar", time.time() - start_time)
-
-        # expert_matrix = copy.deepcopy(entry)
+    def build_prefetch_matrix(self, expert_matrix, layer_idx):
+        expert_matrix = expert_matrix.copy()
         expert_matrix[:layer_idx, :] = 0
-
         for l in range(layer_idx, self.num_layers):
             expert_matrix[l] = (
                 expert_matrix[l] + 1e-8
             ) * self.layer_decay_func(l, layer_idx, self.num_layers)
 
         return expert_matrix
+
+    def predict_from_current_trace(self, seq_id, layer_idx):
+        current_entry = self.tracer.get_entry(seq_id)
+        expert_matrix = self.tracer.find_most_similar(
+            current_entry.matrix, layer_idx
+        )
+        return self.build_prefetch_matrix(expert_matrix, layer_idx)
+
+    def predict(self, seq_id, expert_list, layer_idx):
+        self.tracer.update_entry(seq_id, expert_list, layer_idx)
+        return self.predict_from_current_trace(seq_id, layer_idx)

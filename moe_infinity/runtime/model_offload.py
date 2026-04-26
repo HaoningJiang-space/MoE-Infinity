@@ -13,6 +13,7 @@ from typing import Callable, Dict, Type, Union
 
 import torch
 import transformers
+from transformers import PreTrainedModel, PretrainedConfig
 
 # import torch.distributed as dist
 # from torch.distributed import rpc
@@ -32,22 +33,12 @@ except ImportError:
 
 from safetensors import safe_open
 from tqdm import tqdm
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
 
 import moe_infinity
 from moe_infinity.common import parse_expert_type
 from moe_infinity.distributed import DistributedExpertExecutor
 from moe_infinity.memory import ExpertPredictor, ExpertPrefetcher, ExpertTracer
-from moe_infinity.models import (
-    DeepseekMoEBlock,
-    Qwen3MoEBlock,
-    SyncArcticMoeBlock,
-    SyncGrokMoeBlock,
-    SyncMixtralSparseMoeBlock,
-    SyncNllbMoeSparseMLP,
-    SyncSwitchTransformersSparseMLP,
-)
-from moe_infinity.runtime.compile import script_expert
+from moe_infinity.policies import OffloadingPolicyManager
 from moe_infinity.runtime.hooks import *
 from moe_infinity.utils import (
     ArcherConfig,
@@ -63,6 +54,67 @@ from moe_infinity.utils.arguments import (
 _prefetch_lib = None
 # Alias for compatibility
 prefetch_op = None
+
+
+def _optional_model_attr(module_name: str, attr_name: str):
+    try:
+        module = importlib.import_module(module_name)
+        return getattr(module, attr_name)
+    except Exception:
+        return None
+
+
+def _optional_module(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+DeepseekMoEBlock = _optional_model_attr(
+    "moe_infinity.models.deepseek",
+    "DeepseekMoEBlock",
+)
+Qwen2MoEBlock = _optional_model_attr(
+    "moe_infinity.models.qwen",
+    "Qwen2MoEBlock",
+)
+Qwen3MoEBlock = _optional_model_attr(
+    "moe_infinity.models.qwen",
+    "Qwen3MoEBlock",
+)
+SyncArcticMoeBlock = _optional_model_attr(
+    "moe_infinity.models.arctic",
+    "SyncArcticMoeBlock",
+)
+SyncGrokMoeBlock = _optional_model_attr(
+    "moe_infinity.models.grok",
+    "SyncGrokMoeBlock",
+)
+SyncMixtralSparseMoeBlock = _optional_model_attr(
+    "moe_infinity.models.mixtral",
+    "SyncMixtralSparseMoeBlock",
+)
+SyncNllbMoeSparseMLP = _optional_model_attr(
+    "moe_infinity.models.nllb_moe",
+    "SyncNllbMoeSparseMLP",
+)
+SyncSwitchTransformersSparseMLP = _optional_model_attr(
+    "moe_infinity.models.switch_transformers",
+    "SyncSwitchTransformersSparseMLP",
+)
+_grok_modeling = _optional_module(
+    "moe_infinity.models.modeling_grok.modeling_grok1"
+)
+_arctic_modeling = _optional_module(
+    "moe_infinity.models.modeling_arctic.modeling_arctic"
+)
+_deepseek_v2_modeling = _optional_module(
+    "moe_infinity.models.modeling_deepseek_v2.modeling_deepseek"
+)
+_deepseek_v3_modeling = _optional_module(
+    "moe_infinity.models.modeling_deepseek_v3.modeling_deepseek"
+)
 
 
 def _load_prefetch_lib():
@@ -102,6 +154,7 @@ class OffloadEngine(object):
         self.expert_tracer = ExpertTracer(capacity, config)
         self.expert_predictor = ExpertPredictor(config)
         self.expert_predictor.add_tracer(self.expert_tracer)
+        self.offloading_policy = None
 
         # self.expert_cache = ExpertCache(config)
         self.config = config
@@ -196,6 +249,18 @@ class OffloadEngine(object):
         # self.expert_prefetcher.set_archer_engine(self.archer_engine)
 
         return self
+
+    def finish_sequence(self, seq_id: str):
+        if seq_id not in self.expert_tracer.trace:
+            return
+        if self.offloading_policy is not None:
+            self.offloading_policy.finish_sequence(seq_id)
+        self.expert_tracer.finish_entry(seq_id)
+        self.expert_tracer.remove_entry(seq_id)
+
+    def finish_sequences(self, seq_ids):
+        for seq_id in seq_ids:
+            self.finish_sequence(seq_id)
 
     def __enter__(self):
         def torch_index_select_decorator(orig_torch_index_select: Callable):
@@ -307,51 +372,64 @@ class OffloadEngine(object):
 
         activate_empty_init()
 
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._old_cast_classifier = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier = cast_classifier_decorator(
-            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router._cast_classifier
+        switch_router_cls = (
+            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersTop1Router
         )
+        if hasattr(switch_router_cls, "_cast_classifier"):
+            switch_router_cls._old_cast_classifier = (
+                switch_router_cls._cast_classifier
+            )
+            switch_router_cls._cast_classifier = cast_classifier_decorator(
+                switch_router_cls._cast_classifier
+            )
 
-        transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP
-        transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = SyncSwitchTransformersSparseMLP
-        transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
-            transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
-        )
-        transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
-            SyncNllbMoeSparseMLP
-        )
-        transformers.models.mixtral.modeling_mixtral._old_sparse_mlp = (
-            transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock
-        )
-        transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = (
-            SyncMixtralSparseMoeBlock
-        )
+        if SyncSwitchTransformersSparseMLP is not None:
+            transformers.models.switch_transformers.modeling_switch_transformers._old_sparse_mlp = transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP
+            transformers.models.switch_transformers.modeling_switch_transformers.SwitchTransformersSparseMLP = SyncSwitchTransformersSparseMLP
+        if SyncNllbMoeSparseMLP is not None:
+            transformers.models.nllb_moe.modeling_nllb_moe._old_sparse_mlp = (
+                transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP
+            )
+            transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeSparseMLP = (
+                SyncNllbMoeSparseMLP
+            )
+        if SyncMixtralSparseMoeBlock is not None:
+            transformers.models.mixtral.modeling_mixtral._old_sparse_mlp = (
+                transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock
+            )
+            transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = (
+                SyncMixtralSparseMoeBlock
+            )
 
-        transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
-        transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
+        if Qwen2MoEBlock is not None:
+            transformers.models.qwen2_moe.modeling_qwen2_moe._old_sparse_mlp = transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock
+            transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock = Qwen2MoEBlock
 
-        moe_infinity.models.modeling_grok.modeling_grok1._old_sparse_mlp = (
-            moe_infinity.models.modeling_grok.MoeBlock
-        )
-        moe_infinity.models.modeling_grok.modeling_grok1.MoeBlock = (
-            SyncGrokMoeBlock
-        )
+        if Qwen3MoEBlock is not None:
+            transformers.models.qwen3_moe.modeling_qwen3_moe._old_sparse_mlp = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
+            transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoEBlock
 
-        moe_infinity.models.modeling_arctic._old_sparse_mlp = (
-            moe_infinity.models.modeling_arctic.ArcticMoE
-        )
-        moe_infinity.models.modeling_arctic.modeling_arctic.ArcticMoE = (
-            SyncArcticMoeBlock
-        )
+        if SyncGrokMoeBlock is not None and _grok_modeling is not None:
+            _grok_modeling._old_sparse_mlp = _grok_modeling.MoeBlock
+            _grok_modeling.MoeBlock = SyncGrokMoeBlock
 
-        moe_infinity.models.modeling_deepseek_v2._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v2.DeepseekV2MoE
-        )
-        moe_infinity.models.modeling_deepseek_v3._old_sparse_mlp = (
-            moe_infinity.models.modeling_deepseek_v3.DeepseekV3MoE
-        )
-        moe_infinity.models.modeling_deepseek_v2.modeling_deepseek.DeepseekV2MoE = DeepseekMoEBlock
-        moe_infinity.models.modeling_deepseek_v3.modeling_deepseek.DeepseekV3MoE = DeepseekMoEBlock
+        if SyncArcticMoeBlock is not None and _arctic_modeling is not None:
+            _arctic_modeling._old_sparse_mlp = _arctic_modeling.ArcticMoE
+            _arctic_modeling.ArcticMoE = SyncArcticMoeBlock
+
+        if (
+            DeepseekMoEBlock is not None
+            and _deepseek_v2_modeling is not None
+            and _deepseek_v3_modeling is not None
+        ):
+            _deepseek_v2_modeling._old_sparse_mlp = (
+                _deepseek_v2_modeling.DeepseekV2MoE
+            )
+            _deepseek_v3_modeling._old_sparse_mlp = (
+                _deepseek_v3_modeling.DeepseekV3MoE
+            )
+            _deepseek_v2_modeling.DeepseekV2MoE = DeepseekMoEBlock
+            _deepseek_v3_modeling.DeepseekV3MoE = DeepseekMoEBlock
 
         def from_pretrained_decorator(
             orig_from_pretrained: Callable,
@@ -520,6 +598,12 @@ class OffloadEngine(object):
 
                 self.expert_prefetcher = ExpertPrefetcher(self.config)
                 self.expert_prefetcher.set_archer_engine(self.archer_engine)
+                self.expert_prefetcher.prefetch_future_layers = int(
+                    getattr(self.archer_config, "prefetch_future_layers", 0)
+                )
+                self.expert_prefetcher.prefetch_max_candidates = int(
+                    getattr(self.archer_config, "prefetch_max_candidates", 0)
+                )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,
@@ -562,6 +646,12 @@ class OffloadEngine(object):
                 # print("expert_tensor_map", self.expert_tensor_map, flush=True)
                 self.expert_prefetcher.expert_tensor_map = (
                     self.expert_tensor_map
+                )
+                self.offloading_policy = OffloadingPolicyManager(
+                    config=self.archer_config,
+                    tracer=self.expert_tracer,
+                    predictor=self.expert_predictor,
+                    model_tag=model_name.lower(),
                 )
 
                 # for deepseek, we need to set the expert_tensor_map for the model
@@ -609,16 +699,24 @@ class OffloadEngine(object):
 
                 module_idx = 0
                 self.expert_layer_modules = []
+                expert_module_types = tuple(
+                    cls
+                    for cls in (
+                        SyncNllbMoeSparseMLP,
+                        SyncSwitchTransformersSparseMLP,
+                        SyncMixtralSparseMoeBlock,
+                        SyncGrokMoeBlock,
+                        SyncArcticMoeBlock,
+                        DeepseekMoEBlock,
+                        Qwen2MoEBlock,
+                        Qwen3MoEBlock,
+                    )
+                    if cls is not None
+                )
                 for module in model.modules():
                     if (
-                        isinstance(module, SyncNllbMoeSparseMLP)
-                        or isinstance(module, SyncSwitchTransformersSparseMLP)
-                        or isinstance(module, SyncNllbMoeSparseMLP)
-                        or isinstance(module, SyncMixtralSparseMoeBlock)
-                        or isinstance(module, SyncGrokMoeBlock)
-                        or isinstance(module, SyncArcticMoeBlock)
-                        or isinstance(module, DeepseekMoEBlock)
-                        or isinstance(module, Qwen3MoEBlock)
+                        expert_module_types
+                        and isinstance(module, expert_module_types)
                     ):
                         # module.archer_prefetch = self.archer_prefetch
                         # module.archer_tracer = self.archer_tracer
@@ -630,6 +728,17 @@ class OffloadEngine(object):
                         module.expert_prefetcher = self.expert_prefetcher
                         module.expert_tracer = self.expert_tracer
                         module.expert_predictor = self.expert_predictor
+                        module.expert_policy = self.offloading_policy
+                        module.enable_expert_prefetch = bool(
+                            self.archer_config.prefetch
+                        )
+                        module.expert_policy_score_only = bool(
+                            getattr(
+                                self.archer_config,
+                                "policy_score_only",
+                                False,
+                            )
+                        )
                         module.expert_tensor_map = self.expert_tensor_map
 
                         module.lib = self.prefetch_lib
@@ -694,6 +803,26 @@ class OffloadEngine(object):
         name_lst = []
         ret_dict = {}
 
+        def _is_routed_expert_tensor(tensor_name: str) -> bool:
+            if "expert" not in tensor_name:
+                return False
+            if "shared_expert" in tensor_name or "shared_experts" in tensor_name:
+                return False
+            return True
+
+        def _parse_routed_expert_group(tensor_name: str):
+            components = tensor_name.split(".")
+            if "experts" not in components:
+                return None
+            expert_pos = components.index("experts")
+            stored_name = ".".join(components[: expert_pos + 1])
+            if expert_pos + 1 < len(components) and components[expert_pos + 1].isdigit():
+                expert_name = components[expert_pos + 1]
+            else:
+                # Packed expert parameterization, e.g. Qwen2Moe grouped weights.
+                expert_name = "packed"
+            return stored_name, expert_name
+
         # print("Getting topology ...", self.name_id_map)
 
         # for name in model.state_dict().keys():
@@ -703,13 +832,9 @@ class OffloadEngine(object):
                 print("param not in self.name_id_map", name)
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
-                    match = re.match(r"(.*experts)", name)
-                    assert match, "Not correct expert name!"
-                    stored_name = match.group(1)
-                    components = name.split(".")
-                    # Use negative indexing to get the component between the last third and second dot
-                    expert_name = components[-3]
+                routed_group = _parse_routed_expert_group(name)
+                if _is_routed_expert_tensor(name) and routed_group is not None:
+                    stored_name, expert_name = routed_group
                     if stored_name in name_lst:
                         if expert_name in ret_dict[stored_name]:
                             ret_dict[stored_name][expert_name].append(
@@ -752,13 +877,9 @@ class OffloadEngine(object):
                 # print("buffer not in self.name_id_map", name)
                 continue
             if match:
-                if "expert" in name and "shared_experts" not in name:
-                    match = re.match(r"(.*experts)", name)
-                    assert match, "Not correct expert name!"
-                    stored_name = match.group(1)
-                    components = name.split(".")
-                    # Use negative indexing to get the component between the last third and second dot
-                    expert_name = components[-3]
+                routed_group = _parse_routed_expert_group(name)
+                if _is_routed_expert_tensor(name) and routed_group is not None:
+                    stored_name, expert_name = routed_group
                     if stored_name in name_lst:
                         if expert_name in ret_dict[stored_name]:
                             ret_dict[stored_name][expert_name].append(

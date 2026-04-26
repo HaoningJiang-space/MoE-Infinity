@@ -19,6 +19,8 @@
 #include <c10/cuda/CUDAStream.h>
 
 #include <future>
+#include <algorithm>
+#include <chrono>
 
 ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
                                    int expert_type, int num_threads)
@@ -32,13 +34,13 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       // input_cv_(kNumDevices),
       // exec_mutex_(kNumDevices),
       // exec_cv_(kNumDevices),
-      cache_mutex_(kNumDevices),
-      cache_cv_(kNumDevices),
-      input_queue_(kNumDevices),
-      gpu_overload_(kNumDevices, false),
-      exec_queue_(kNumDevices),
-      cached_experts_(kNumDevices),
-      modules_(kNumDevices, nullptr) {
+      cache_mutex_(kNumDevices()),
+      cache_cv_(kNumDevices()),
+      input_queue_(kNumDevices()),
+      gpu_overload_(kNumDevices(), false),
+      exec_queue_(kNumDevices()),
+      cached_experts_(kNumDevices()),
+      modules_(kNumDevices(), nullptr) {
   main_thread_stop_flag_.store(false);
 
   // module_ = new MoEMLP(dtype, expert_type);
@@ -47,7 +49,7 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   // gpu_overload_ = std::move(std::vector<Futex<bool>>(kNumDevices,
   // initial_value));
 
-  for (int i = 0; i < kNumDevices; ++i) {
+  for (int i = 0; i < kNumDevices(); ++i) {
     auto thread_func = std::bind(&ExpertDispatcher::GPUFetchFunc, this, i);
     std::string thread_name = "GPUFetchFunc" + std::to_string(i);
     threads_.emplace_back(new base::Thread(thread_func, thread_name));
@@ -70,8 +72,9 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
     // cudaDeviceSynchronize();
 
     auto thread_func =
-        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices);
-    std::string thread_name = "GPUExecFunc" + std::to_string(i % kNumDevices);
+        std::bind(&ExpertDispatcher::GPUExecFunc, this, i % kNumDevices());
+    std::string thread_name =
+        "GPUExecFunc" + std::to_string(i % kNumDevices());
     threads_.emplace_back(new base::Thread(thread_func, thread_name));
     threads_.back()->start();
     // SetThreadAffinity(threads_.back()->tid());
@@ -117,6 +120,37 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
   }
 }
 
+ExpertDispatcher::~ExpertDispatcher() {
+  main_thread_stop_flag_.store(true);
+  ShutdownQueues();
+  for (auto& thread : threads_) {
+    thread->join();
+  }
+
+  for (auto& stream : exec_streams_) {
+    cudaStreamDestroy(stream);
+  }
+}
+
+void ExpertDispatcher::ShutdownQueues() {
+  for (int gpu_id = 0; gpu_id < kNumDevices(); ++gpu_id) {
+    CallArgs input_sentinel;
+    input_sentinel.layer_idx = -1;
+    input_sentinel.expert_idx = -1;
+    input_sentinel.gpu_id = gpu_id;
+    input_queue_[gpu_id].Push(input_sentinel);
+  }
+
+  int exec_threads_per_gpu =
+      std::max<int>(1, static_cast<int>(exec_streams_.size()) / kNumDevices());
+  for (int gpu_id = 0; gpu_id < kNumDevices(); ++gpu_id) {
+    for (int i = 0; i < exec_threads_per_gpu; ++i) {
+      ExecArgs exec_sentinel;
+      exec_queue_[gpu_id].Push(exec_sentinel);
+    }
+  }
+}
+
 void ExpertDispatcher::EnqueueExpert(int layer_idx, int expert_idx, int gpu_id,
                                      bool remote) {
   ExpertDispatcher::CallArgs args;
@@ -134,10 +168,22 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   auto expert_node = experts_[expert_idx][layer_idx];
 
   if (!expert_node->node->mutex.try_lock()) {
-    // NOTE: try lock must success, if there is no prefetching
-    DLOG_FATAL("ExpertDispatcher::Enqueue: mutex try_lock failed (expert_idx ",
-               expert_idx, " layer_idx ", layer_idx, "node ",
-               expert_node->node->str(), ")");
+    auto wait_start = std::chrono::steady_clock::now();
+    DLOG_WARN("ExpertDispatcher::Enqueue: waiting on busy expert node "
+              "(expert_idx ",
+              expert_idx, " layer_idx ", layer_idx, "node ",
+              expert_node->node->str(), ")");
+    expert_node->node->mutex.lock();
+    auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - wait_start)
+                       .count();
+    busy_wait_count_.fetch_add(1);
+    busy_wait_total_wait_us_.fetch_add(wait_us);
+    auto current_max = busy_wait_max_wait_us_.load();
+    while (wait_us > current_max &&
+           !busy_wait_max_wait_us_.compare_exchange_weak(current_max,
+                                                         wait_us)) {
+    }
   }
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
@@ -169,6 +215,7 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   // exec_cv_[args.gpu_id].notify_all();
   // input_queue_.push_back(std::move(args));
   num_enqueued_.fetch_add(1);
+  enqueue_count_.fetch_add(1);
 
   // auto& a = input_queue_.back();
   // if (expert_node->node->device.is_cuda()) {
@@ -181,6 +228,22 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   //            ", a.remote);
   // lock.unlock();
   // cvs_[MUTEX_TYPE::INPUT_MUTEX].notify_all();
+}
+
+std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
+  return {
+      enqueue_count_.load(),
+      busy_wait_count_.load(),
+      busy_wait_total_wait_us_.load(),
+      busy_wait_max_wait_us_.load(),
+  };
+}
+
+void ExpertDispatcher::ResetRuntimeStats() {
+  enqueue_count_.store(0);
+  busy_wait_count_.store(0);
+  busy_wait_total_wait_us_.store(0);
+  busy_wait_max_wait_us_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -201,7 +264,7 @@ void ExpertDispatcher::RegisterExpert(
 }
 
 void ExpertDispatcher::NotifyFetchStart() {
-  for (int i = 0; i < kNumDevices; ++i) {
+  for (int i = 0; i < kNumDevices(); ++i) {
     // std::unique_lock<std::mutex> lock(input_mutex_[i]);
     input_queue_[i].NotifyAll();
   }
@@ -271,6 +334,9 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     // lock.unlock();
     CallArgs args;
     input_queue_[gpu_id].Pop(args);
+    if (main_thread_stop_flag_.load() && args.layer_idx < 0) {
+      break;
+    }
 
     auto device = CUDA_DEVICE(gpu_id);
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
@@ -452,6 +518,9 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
     exec_queue_[gpu_id].Pop(args);
 
     if (args.expert_node == nullptr) {
+      if (main_thread_stop_flag_.load()) {
+        break;
+      }
       continue;
     }
 
@@ -460,6 +529,9 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
     auto expert_idx = args.expert_node->expert_idx;
 
     auto token_mask = router_mask_.index({"...", expert_idx});
+    if (token_mask.device() != hidden_states_.device()) {
+      token_mask = token_mask.to(hidden_states_.device(), /*non_blocking=*/true);
+    }
     torch::Tensor input = (batch_size == 1)
                               ? hidden_states_.to(device)
                               : hidden_states_.index({token_mask}).to(device);
@@ -545,12 +617,28 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
   // }
 
   if (batch_size == 1) {
+    auto router_weight = router_weight_;
+    if (router_weight.device() != output_tensor.device()) {
+      router_weight = router_weight.to(output_tensor.device(), /*non_blocking=*/true);
+    }
     final_hidden_states_.add_(
         output_tensor *
-        router_weight_.index({torch::indexing::Slice(), expert_idx}));
+        router_weight.index({torch::indexing::Slice(), expert_idx}));
   } else {
+    auto mask_for_weight = token_mask;
+    if (mask_for_weight.device() != router_weight_.device()) {
+      mask_for_weight = mask_for_weight.to(
+          router_weight_.device(), /*non_blocking=*/true);
+    }
     auto token_indices = torch::nonzero(token_mask).squeeze(1);
-    auto weights = router_weight_.index({token_mask, expert_idx}).unsqueeze(1);
+    if (token_indices.device() != final_hidden_states_.device()) {
+      token_indices =
+          token_indices.to(final_hidden_states_.device(), /*non_blocking=*/true);
+    }
+    auto weights = router_weight_.index({mask_for_weight, expert_idx}).unsqueeze(1);
+    if (weights.device() != output_tensor.device()) {
+      weights = weights.to(output_tensor.device(), /*non_blocking=*/true);
+    }
     auto weighted_output = output_tensor * weights;
     final_hidden_states_.index_add_(0, token_indices, weighted_output);
   }

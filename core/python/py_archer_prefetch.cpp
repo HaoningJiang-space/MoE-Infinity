@@ -96,6 +96,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       //  .def("wait_expert", &ExpertDispatcher::WaitExpert)
       .def("wait_expert", &ExpertDispatcher::WaitHiddenStates)
       .def("notify_fetch_start", &ExpertDispatcher::NotifyFetchStart)
+      .def("get_runtime_stats", &ExpertDispatcher::GetRuntimeStats)
+      .def("reset_runtime_stats", &ExpertDispatcher::ResetRuntimeStats)
       .def("clear_expert_cache_counts",
            &ExpertDispatcher::ClearExpertCacheCounts);
 }

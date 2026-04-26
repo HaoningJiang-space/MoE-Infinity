@@ -1,12 +1,13 @@
-"""Unit-test conftest: stub optional/GPU dependencies before collection.
-
-Prevents ImportError when moe_infinity submodules are imported in
-environments where the optional 'nvtx' profiling library or compiled
-CUDA extensions (_store, _engine) are not installed.
-"""
+"""Unit-test conftest: make source tree importable and stub optional deps."""
 
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def _stub_if_missing(name: str) -> None:
