@@ -228,6 +228,78 @@ Geometry-aware continuation retrieval
 - 更强 memory pressure，证明真的解决 paging/stall，而不是低压力下的 benchmark noise。
 - 正常 performance sweep 和 robustness boundary 必须分开，避免把 runtime correctness bug 混进性能结论。
 
+## 具体补充路线
+
+现在不要继续盲目加 predictor。后续补充应该按下面三个轨道推进。
+
+### A. 正常性能证据
+
+目标是证明 continuation cache 的 candidate 优势能在真实 runtime 下转成 latency / stall 收益。
+
+优先补：
+
+- 等 `v10` fixed-length pressure sweep 完整跑完。
+- 汇总 `ratio_060/045/035` 下的 `ms/token`、p95 latency、busy wait、cache hit、Phase-A same-step M32 recall / omission gap。
+- 如果 `ratio_035` 稳定，再补一个 conservative strong-pressure 点：
+  - `device_memory_ratio=0.30`
+  - `prefetch_future_layers=2`
+  - `prefetch_max_candidates=16`
+- 正常性能图表只放不崩溃、可重复的配置。
+
+预期图表：
+
+- Figure 1: object-vs-controller score-only recall / omission gap, 使用 v9。
+- Figure 2: fixed-length runtime under memory pressure, 使用 v10。
+- Figure 3: local vs sequence object latency breakdown / busy-wait trend。
+
+### B. Runtime progress 修复与 robustness 证据
+
+目标是把 v10b 暴露的问题收成 runtime progress guarantee，而不是把 crash 混进性能结论。
+
+软件侧需要补：
+
+- demand fetch: `wait once then fatal` 改为 `while no victim -> wait/recheck`。
+- prefetch: no-victim 或 cache-pressure 高时 drop/defer，不能和 demand fetch 平权抢 cache。
+- victim selection: `FindExpertEvict()` 要么持锁到 eviction 完成，要么 eviction 前重新校验。
+- diagnostics: 记录 all-locked event、no-victim wait time、prefetch drop/defer count、demand-vs-prefetch conflict count。
+
+实验侧需要分开：
+
+- normal performance sweep: `0.60/0.45/0.35`，或者 conservative `0.30`。
+- robustness boundary: `0.30 + future_layers=4 + max_candidates=32`。
+
+robustness boundary 的用途：
+
+- 证明强 pressure 下当前 runtime 会进入 all-locked / no-victim 区间。
+- 证明 progress fix 后不再 fatal，只表现为可计量的 wait/drop/defer。
+- 给 HPCA 方向提供 demand/prefetch priority、reserved slots、evictable metadata 的动机。
+
+### C. HPCA / co-design 补充
+
+目标是把 continuation cache 从 software method 提升成 architecture entry point。
+
+需要补的 measurement：
+
+- local key construction time。
+- continuation lookup time。
+- aggregation time。
+- prefetch enqueue time。
+- transfer wait / deadline miss。
+- metadata footprint: per-entry bytes、library total bytes、query working set。
+- runtime pressure counters: evictable-node count、locked-node count、queue occupancy。
+
+需要补的模型：
+
+- software local continuation baseline。
+- local continuation + reduced metadata lookup latency。
+- local continuation + demand/prefetch priority queue。
+- local continuation + reserved demand slots。
+- local continuation + fast evictable-set metadata。
+
+HPCA 论文里不要声称硬件“修 bug”。正确说法是：
+
+> 软件先提供 progress guarantee；硬件/architecture substrate 让 all-locked 状态更少、更短、更可控。
+
 后续最好补：
 
 - 第二个模型，验证不是 Qwen 特例。

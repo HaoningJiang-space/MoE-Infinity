@@ -387,6 +387,34 @@ Instrument:
 
 This is the most important step for HPCA framing.
 
+### Stage 2.5: fix and expose runtime progress
+
+The v10b failure should be converted into a measurable progress boundary.
+
+Software fixes:
+
+- replace one-shot no-victim wait with `while no victim -> wait/recheck`
+- make prefetch best-effort under pressure:
+  - drop if no victim is available
+  - defer if demand traffic is active
+  - throttle when the evictable set is small
+- protect victim selection against TOCTOU:
+  - hold the victim lock through eviction
+  - or revalidate immediately before eviction
+- add bounded diagnostics instead of fatal:
+  - long no-victim wait warning
+  - all-locked counter
+  - prefetch drop/defer counter
+
+After this fix, the same strong-pressure setup should produce:
+
+- no process fatal
+- increased no-victim wait time
+- measurable prefetch drop/defer rate
+- demand fetch progress preserved
+
+This stage is required before using strong-pressure results in any paper figure.
+
 ### Stage 3: build a trace-driven co-design model
 
 Before RTL, build a compact performance model that estimates the impact of:
@@ -394,6 +422,9 @@ Before RTL, build a compact performance model that estimates the impact of:
 - lower metadata lookup latency
 - on-chip continuation metadata residency
 - deadline-aware transfer scheduling
+- demand/prefetch priority separation
+- reserved demand cache slots
+- fast evictable-set metadata
 
 This lets us compare:
 
@@ -401,6 +432,101 @@ This lets us compare:
 - software + CPE model
 
 without overcommitting to a hardware implementation too early.
+
+---
+
+## Concrete Implementation Backlog
+
+### P0: keep the evidence clean
+
+- Finish `v10` as the normal fixed-length pressure sweep.
+- Do not rerun `v10b` aggressive `ratio_030` as a normal performance point.
+- If GPU0 is used before the progress fix, use a safer supplement:
+  - `ratio_040/035`
+  - or `ratio_030` with `prefetch_future_layers=2` and `prefetch_max_candidates=16`
+
+### P1: add progress counters
+
+Add runtime counters for:
+
+- `no_victim_wait_count`
+- `no_victim_wait_total_us`
+- `no_victim_wait_max_us`
+- `all_locked_event_count`
+- `prefetch_drop_count`
+- `prefetch_defer_count`
+- `demand_prefetch_conflict_count`
+
+Expose them through benchmark raw JSON and decision summaries.
+
+### P2: add timing breakdown
+
+Add per-policy timing fields for:
+
+- key construction
+- lookup
+- aggregation
+- scoring/ranking
+- enqueue
+
+For C++ runtime, add event-level timing for:
+
+- fetch queue wait
+- H2D transfer wait
+- execution wait
+- no-victim wait
+
+### P3: implement progress semantics
+
+Demand fetch:
+
+- loop on no-victim wait
+- recheck after every wakeup
+- never fatal on a temporarily empty evictable set
+
+Prefetch:
+
+- treat prefetch as best-effort
+- drop or defer under no-victim pressure
+- expose drop/defer counts as first-class metrics
+
+Victim selection:
+
+- hold victim ownership through eviction, or revalidate before eviction
+- avoid selecting a node that becomes locked before actual eviction
+
+### P4: run post-fix experiments
+
+Run three classes of experiments:
+
+- normal performance: `0.60/0.45/0.35`
+- conservative strong pressure: `0.30 + future_layers=2 + max_candidates=16`
+- robustness boundary: `0.30 + future_layers=4 + max_candidates=32`
+
+The expected post-fix behavior is not that aggressive `0.30` becomes fast. The expected behavior is:
+
+- no fatal crash
+- demand progress preserved
+- prefetch drop/defer rises under pressure
+- no-victim wait becomes measurable instead of hidden
+
+### P5: build the co-design model
+
+Use the measured counters to simulate:
+
+- faster metadata lookup
+- priority-separated demand/prefetch queues
+- reserved demand slots
+- hardware-visible evictable-set metadata
+
+The model output should report:
+
+- projected ms/token
+- no-victim wait reduction
+- deadline miss reduction
+- wasted prefetch reduction
+
+This is the bridge from software prototype to HPCA contribution.
 
 ---
 
