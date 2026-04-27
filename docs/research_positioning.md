@@ -43,11 +43,35 @@ expert prediction / prefetch / cache / paging 这条线已经很挤。相关工�
 
 ## 当前核心证据
 
-已有 v6/v7/v8 结果支持这个方向：
+已有 v6/v7/v8/v9 结果支持这个方向：
 
 - v6 score-only: local continuation 明显提高 same-step recall，降低 omission gap，但最初 decision latency 偏高。
 - v7 acceleration: local path decision latency 从约 2.5ms 降到约 0.6ms，说明工程瓶颈主要是实现方式，不是 object 本身错。
 - v8 runtime: `history_reuse_local_backbone` 在真实 runtime 下已经能和 consensus/backbone 对比，recurrence-heavy 上收益明显。
+- v9 score-only object-vs-controller: local continuation + simple ranking 稳定打过 sequence object + 更复杂 controller/retrieval。
+
+v9 是目前最干净的 object-vs-controller 证据：
+
+- 结果目录：`/data/ziheng/moe_infinity_fgo_runs/phasea_v9_scoreonly_object_vs_controller_qwen`
+- 汇总文件：`analysis/decision_summary.md`
+- 固定输出长度：所有 case 都是 `fixed_new_tokens=true`，避免 EOS early stop 污染 score-only 对比。
+- 对比对象：
+  - sequence object + simple: `history_reuse_backbone`
+  - sequence object + topk controller: `history_reuse_topk_backbone`
+  - sequence object + consensus controller: `history_reuse_consensus_backbone`
+  - sequence object + recent retrieval: `history_reuse_consensus_backbone_retrieval`
+  - local continuation object + simple ranking: `history_reuse_local_backbone`
+- 三个 trace 上，local continuation 的 same-step M32 pair recall 稳定在约 `0.466-0.480`。
+- sequence object 的几个 controller/retrieval 变体，same-step M32 pair recall 只有约 `0.176-0.226`。
+- local continuation 的 same-step M32 omission gap 约 `0.487-0.503`。
+- sequence object 的 omission gap 约 `0.680-0.737`。
+- local continuation 的 decision latency mean 约 `497-509us`，低于 sequence object simple 的约 `1105-1135us`，也明显低于 consensus/recent retrieval 的约 `1489-2195us`。
+
+v9 的解释很关键：
+
+- 把 sequence object 的 controller 做得更复杂，只能带来小幅 recall 波动，无法根治 omission。
+- 把 retrieval object 换成 local continuation，即使用 simple ranking，也能把 oracle expert 更频繁放进候选集合。
+- 所以主张应写成“object mismatch 是一级瓶颈”，而不是“我们有一个更强 predictor/controller”。
 
 最关键的诊断是：
 
@@ -131,16 +155,20 @@ Continuation Cache for MoE Expert Paging
 - 用 omission-gap decomposition 区分 candidate generation 和 ranking/controller。
 - 用 continuation cache 降低 omission gap，并转化为 runtime latency / stall 改善。
 
-当前正在补的实验：
+当前实验状态：
 
-- v9 score-only object-vs-controller:
+- v9 score-only object-vs-controller 已完成:
   - 对比 sequence object + simple/topk/consensus/recent-retrieval controller。
   - 对比 local continuation + simple ranking。
-  - 目标是证明 object change 比 controller refinement 更关键。
-- v10 runtime fixed-length pressure sweep:
+  - 结论是 object change 比 controller refinement 更关键。
+- v10 runtime fixed-length pressure sweep 正在跑:
   - 固定生成长度，消除 EOS early stop 干扰。
   - 扫 device memory ratio，制造更强 paging pressure。
   - 目标是证明 continuation cache 不只是 observation artifact，而能改善 runtime。
+- v10b runtime strong pressure sweep 正在跑:
+  - 在 GPU0 上补 `device_memory_ratio=0.30/0.25`。
+  - 只保留 `on_demand`、`history_reuse_consensus_backbone`、`history_reuse_local_backbone`。
+  - 目标是更快拿到强 pressure 下 local continuation 是否转化为 runtime/stall 收益的证据。
 
 ### 第二阶段：增强方向
 
@@ -187,12 +215,16 @@ Geometry-aware continuation retrieval
 
 ## 需要补强的证据
 
-必须补：
+已经补到第一版的证据：
+
+- v9 固定输出长度 score-only object-vs-controller。
+- 三个 Qwen trace/workload：`mixed`、`recurrence_heavy`、`stationary`。
+- local object + simple ranking 优于 sequence object + stronger ranking/controller。
+
+仍必须补：
 
 - 固定输出长度的 runtime，避免 generated token 数不同污染 latency。
 - 更强 memory pressure，证明真的解决 paging/stall，而不是低压力下的 benchmark noise。
-- object-vs-controller 正交对照，证明 local object + simple ranking 优于 sequence object + stronger ranking。
-- 至少 3 个 trace/workload；当前 Qwen 先跑满 `mixed`、`recurrence_heavy`、`stationary`。
 
 后续最好补：
 
@@ -207,4 +239,3 @@ Geometry-aware continuation retrieval
 > retrieval-object mismatch + continuation cache 是现在最接近可投系统论文的故事。  
 > 不要退回 better predictor / better paging heuristic。  
 > router calibration 和 geometry-aware retrieval 可以作为后续方向，但现在不应抢主线。
-
