@@ -165,10 +165,11 @@ Continuation Cache for MoE Expert Paging
   - 固定生成长度，消除 EOS early stop 干扰。
   - 扫 device memory ratio，制造更强 paging pressure。
   - 目标是证明 continuation cache 不只是 observation artifact，而能改善 runtime。
-- v10b runtime strong pressure sweep 正在跑:
+- v10b runtime strong pressure sweep 暴露 robustness boundary:
   - 在 GPU0 上补 `device_memory_ratio=0.30/0.25`。
   - 只保留 `on_demand`、`history_reuse_consensus_backbone`、`history_reuse_local_backbone`。
-  - 目标是更快拿到强 pressure 下 local continuation 是否转化为 runtime/stall 收益的证据。
+  - `ratio_030 + future_layers=4 + max_candidates=32` 在 `mixed / history_reuse_local_backbone` 触发 no-victim / all-locked fatal。
+  - 这个结果不能作为正常性能点，但可以作为强 memory pressure 下 runtime progress bug 的 robustness evidence。
 
 ### 第二阶段：增强方向
 
@@ -225,6 +226,7 @@ Geometry-aware continuation retrieval
 
 - 固定输出长度的 runtime，避免 generated token 数不同污染 latency。
 - 更强 memory pressure，证明真的解决 paging/stall，而不是低压力下的 benchmark noise。
+- 正常 performance sweep 和 robustness boundary 必须分开，避免把 runtime correctness bug 混进性能结论。
 
 后续最好补：
 
