@@ -236,8 +236,8 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         "",
         "## Cases",
         "",
-        "| Trace | Variant | Object label | Fixed tokens | tok/s | mean ms/tok | p95 latency (s) | busy waits | event mean us | M32 pair | M32 expert | M32 omission | M32 restricted |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Trace | Variant | Object label | Fixed tokens | tok/s | mean ms/tok | p95 latency (s) | busy waits | evictions | all-locked | no-victim us | event mean us | M32 pair | M32 expert | M32 omission | M32 restricted |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
@@ -245,7 +245,7 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         controller = case.get("controller_latency", {})
         fixed = case.get("fixed_tokens", {})
         lines.append(
-            "| {trace} | {variant} | {label} | {fixed} | {tps} | {ms_tok} | {p95} | {busy} | {event_us} | {pair} | {expert} | {omit} | {restricted} |".format(
+            "| {trace} | {variant} | {label} | {fixed} | {tps} | {ms_tok} | {p95} | {busy} | {evict} | {all_locked} | {no_victim_us} | {event_us} | {pair} | {expert} | {omit} | {restricted} |".format(
                 trace=case["trace_name"],
                 variant=case["variant"],
                 label=case["object_label"],
@@ -254,6 +254,13 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
                 ms_tok=_fmt(aggregate.get("latency_per_generated_token_mean_ms"), 3),
                 p95=_fmt(aggregate.get("latency_p95_s"), 4),
                 busy=_fmt(aggregate.get("mean_dispatcher_busy_wait_count"), 2),
+                evict=_fmt(aggregate.get("mean_dispatcher_eviction_count"), 2),
+                all_locked=_fmt(
+                    aggregate.get("mean_dispatcher_all_locked_event_count"), 2
+                ),
+                no_victim_us=_fmt(
+                    aggregate.get("mean_dispatcher_no_victim_wait_total_us"), 1
+                ),
                 event_us=_fmt(controller.get("decision_latency_mean_us"), 2),
                 pair=_fmt(phasea.get("pair_recall"), 4),
                 expert=_fmt(phasea.get("expert_only_recall"), 4),

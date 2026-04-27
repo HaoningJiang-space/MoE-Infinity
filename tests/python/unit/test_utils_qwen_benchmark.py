@@ -9,6 +9,7 @@ from moe_infinity.utils.qwen_benchmark import (
     percentile,
     summarize_hit_rate_tensor,
 )
+from moe_infinity.utils.qwen_smoke import dispatcher_stats_dict
 
 
 def test_build_qwen_benchmark_config_variants():
@@ -114,6 +115,13 @@ def test_percentile_and_aggregate_metrics():
                 "busy_wait_count": 0,
                 "busy_wait_total_wait_us": 0,
                 "busy_wait_max_wait_us": 0,
+                "cache_hit_fetch_count": 90,
+                "cache_miss_fetch_count": 10,
+                "eviction_count": 3,
+                "all_locked_event_count": 0,
+                "no_victim_wait_count": 0,
+                "no_victim_wait_total_us": 0,
+                "no_victim_wait_max_us": 0,
             },
             "library_stats_delta": {
                 "query_count": 2,
@@ -130,6 +138,13 @@ def test_percentile_and_aggregate_metrics():
                 "busy_wait_count": 1,
                 "busy_wait_total_wait_us": 50,
                 "busy_wait_max_wait_us": 50,
+                "cache_hit_fetch_count": 150,
+                "cache_miss_fetch_count": 50,
+                "eviction_count": 10,
+                "all_locked_event_count": 2,
+                "no_victim_wait_count": 2,
+                "no_victim_wait_total_us": 80,
+                "no_victim_wait_max_us": 60,
             },
             "library_stats_delta": {
                 "query_count": 4,
@@ -146,7 +161,29 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["library_query_count_total"] == 6
     assert aggregate["library_hit_count_total"] == 4
     assert aggregate["mean_dispatcher_enqueue_count"] == 150.0
+    assert aggregate["dispatcher_eviction_count_total"] == 13
+    assert aggregate["mean_dispatcher_eviction_count"] == 6.5
+    assert aggregate["dispatcher_all_locked_event_count_total"] == 2
+    assert aggregate["mean_dispatcher_no_victim_wait_total_us"] == 40.0
+    assert aggregate["p95_dispatcher_no_victim_wait_max_us"] > 0.0
     assert aggregate["mean_cache_hit_rate"] == 0.625
+
+
+def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():
+    legacy = dispatcher_stats_dict([10, 1, 20, 30])
+    assert legacy == {
+        "enqueue_count": 10,
+        "busy_wait_count": 1,
+        "busy_wait_total_wait_us": 20,
+        "busy_wait_max_wait_us": 30,
+    }
+
+    extended = dispatcher_stats_dict([10, 1, 20, 30, 7, 3, 2, 1, 1, 50, 50])
+    assert extended["cache_hit_fetch_count"] == 7
+    assert extended["cache_miss_fetch_count"] == 3
+    assert extended["eviction_count"] == 2
+    assert extended["all_locked_event_count"] == 1
+    assert extended["no_victim_wait_total_us"] == 50
 
 
 def test_summarize_hit_rate_tensor():

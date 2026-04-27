@@ -80,14 +80,27 @@ def dispatcher_stats_dict(stats: Sequence[int] | None) -> Dict[str, int]:
     if not stats:
         return {}
     values = list(stats)
-    if len(values) != 4:
+    if len(values) not in {4, 11}:
         raise ValueError(f"Unexpected dispatcher stats payload: {values}")
-    return {
+    result = {
         "enqueue_count": int(values[0]),
         "busy_wait_count": int(values[1]),
         "busy_wait_total_wait_us": int(values[2]),
         "busy_wait_max_wait_us": int(values[3]),
     }
+    if len(values) >= 11:
+        result.update(
+            {
+                "cache_hit_fetch_count": int(values[4]),
+                "cache_miss_fetch_count": int(values[5]),
+                "eviction_count": int(values[6]),
+                "all_locked_event_count": int(values[7]),
+                "no_victim_wait_count": int(values[8]),
+                "no_victim_wait_total_us": int(values[9]),
+                "no_victim_wait_max_us": int(values[10]),
+            }
+        )
+    return result
 
 
 def visible_cuda_devices(cuda_visible_devices: str | None, names: Iterable[str]) -> Dict[str, object]:

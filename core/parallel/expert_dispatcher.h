@@ -107,6 +107,13 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> busy_wait_count_{0};
   std::atomic<std::uint64_t> busy_wait_total_wait_us_{0};
   std::atomic<std::uint64_t> busy_wait_max_wait_us_{0};
+  std::atomic<std::uint64_t> cache_hit_fetch_count_{0};
+  std::atomic<std::uint64_t> cache_miss_fetch_count_{0};
+  std::atomic<std::uint64_t> eviction_count_{0};
+  std::atomic<std::uint64_t> all_locked_event_count_{0};
+  std::atomic<std::uint64_t> no_victim_wait_count_{0};
+  std::atomic<std::uint64_t> no_victim_wait_total_us_{0};
+  std::atomic<std::uint64_t> no_victim_wait_max_us_{0};
 
   std::atomic<size_t> pending_;
 

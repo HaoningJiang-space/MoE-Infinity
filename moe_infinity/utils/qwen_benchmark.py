@@ -395,6 +395,34 @@ def aggregate_request_records(
         int(record.get("dispatcher_stats", {}).get("busy_wait_max_wait_us", 0))
         for record in request_records
     ]
+    cache_hit_fetch_counts = [
+        int(record.get("dispatcher_stats", {}).get("cache_hit_fetch_count", 0))
+        for record in request_records
+    ]
+    cache_miss_fetch_counts = [
+        int(record.get("dispatcher_stats", {}).get("cache_miss_fetch_count", 0))
+        for record in request_records
+    ]
+    eviction_counts = [
+        int(record.get("dispatcher_stats", {}).get("eviction_count", 0))
+        for record in request_records
+    ]
+    all_locked_event_counts = [
+        int(record.get("dispatcher_stats", {}).get("all_locked_event_count", 0))
+        for record in request_records
+    ]
+    no_victim_wait_counts = [
+        int(record.get("dispatcher_stats", {}).get("no_victim_wait_count", 0))
+        for record in request_records
+    ]
+    no_victim_wait_total_us = [
+        int(record.get("dispatcher_stats", {}).get("no_victim_wait_total_us", 0))
+        for record in request_records
+    ]
+    no_victim_wait_max_us = [
+        int(record.get("dispatcher_stats", {}).get("no_victim_wait_max_us", 0))
+        for record in request_records
+    ]
     library_query_deltas = [
         int(record.get("library_stats_delta", {}).get("query_count", 0))
         for record in request_records
@@ -446,6 +474,43 @@ def aggregate_request_records(
         ),
         "p95_dispatcher_busy_wait_max_wait_us": percentile(
             busy_wait_max_wait_us, 95
+        ),
+        "dispatcher_cache_hit_fetch_count_total": int(sum(cache_hit_fetch_counts)),
+        "dispatcher_cache_miss_fetch_count_total": int(sum(cache_miss_fetch_counts)),
+        "dispatcher_eviction_count_total": int(sum(eviction_counts)),
+        "dispatcher_all_locked_event_count_total": int(sum(all_locked_event_counts)),
+        "dispatcher_no_victim_wait_count_total": int(sum(no_victim_wait_counts)),
+        "dispatcher_no_victim_wait_total_us": int(sum(no_victim_wait_total_us)),
+        "mean_dispatcher_cache_hit_fetch_count": (
+            float(sum(cache_hit_fetch_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_cache_miss_fetch_count": (
+            float(sum(cache_miss_fetch_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_eviction_count": (
+            float(sum(eviction_counts) / request_count) if request_count else 0.0
+        ),
+        "mean_dispatcher_all_locked_event_count": (
+            float(sum(all_locked_event_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_no_victim_wait_count": (
+            float(sum(no_victim_wait_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_no_victim_wait_total_us": (
+            float(sum(no_victim_wait_total_us) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "p95_dispatcher_no_victim_wait_max_us": percentile(
+            no_victim_wait_max_us, 95
         ),
         "library_query_count_total": int(sum(library_query_deltas)),
         "library_hit_count_total": int(sum(library_hit_deltas)),
@@ -534,21 +599,28 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
                     tps=agg["generated_tokens_per_second"],
                     enqueue=agg["mean_dispatcher_enqueue_count"],
                     busy=agg["mean_dispatcher_busy_wait_count"],
+                    evict=agg.get("mean_dispatcher_eviction_count", 0.0),
+                    all_locked=agg.get(
+                        "mean_dispatcher_all_locked_event_count", 0.0
+                    ),
+                    no_victim_us=agg.get(
+                        "mean_dispatcher_no_victim_wait_total_us", 0.0
+                    ),
                     hit=agg["mean_cache_hit_rate"],
                 )
             )

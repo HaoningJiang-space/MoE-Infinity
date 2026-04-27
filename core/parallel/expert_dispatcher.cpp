@@ -188,6 +188,7 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
   if (expert_node->node->device.is_cuda()) {
+    cache_hit_fetch_count_.fetch_add(1);
     args.gpu_id = expert_node->node->device.index();
 
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
@@ -236,6 +237,13 @@ std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
       busy_wait_count_.load(),
       busy_wait_total_wait_us_.load(),
       busy_wait_max_wait_us_.load(),
+      cache_hit_fetch_count_.load(),
+      cache_miss_fetch_count_.load(),
+      eviction_count_.load(),
+      all_locked_event_count_.load(),
+      no_victim_wait_count_.load(),
+      no_victim_wait_total_us_.load(),
+      no_victim_wait_max_us_.load(),
   };
 }
 
@@ -244,6 +252,13 @@ void ExpertDispatcher::ResetRuntimeStats() {
   busy_wait_count_.store(0);
   busy_wait_total_wait_us_.store(0);
   busy_wait_max_wait_us_.store(0);
+  cache_hit_fetch_count_.store(0);
+  cache_miss_fetch_count_.store(0);
+  eviction_count_.store(0);
+  all_locked_event_count_.store(0);
+  no_victim_wait_count_.store(0);
+  no_victim_wait_total_us_.store(0);
+  no_victim_wait_max_us_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -346,6 +361,11 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
 
     auto expert_node = experts_[expert_idx][layer_idx];
     bool cache_hit = expert_node->node->device.is_cuda();
+    if (cache_hit) {
+      cache_hit_fetch_count_.fetch_add(1);
+    } else {
+      cache_miss_fetch_count_.fetch_add(1);
+    }
 
     // std::cerr << "ExpertDispatcher::GPUFetchFunc: gpu_id " << gpu_id
     //           << " layer_idx " << layer_idx << " expert_idx " << expert_idx
@@ -374,6 +394,9 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         // find the expert in gpu and min incache_visit_count
         ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
         if (evict_expert_node == nullptr) {
+          all_locked_event_count_.fetch_add(1);
+          no_victim_wait_count_.fetch_add(1);
+          auto no_victim_wait_start = std::chrono::steady_clock::now();
           // wait for notification that cache is available
           DLOG_WARN(
               "All cached expert locked, waiting for cache to be available. "
@@ -384,6 +407,18 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
           {
             std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
             cache_cv_[gpu_id].wait(lock);
+          }
+          auto no_victim_wait_us =
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - no_victim_wait_start)
+                  .count();
+          auto no_victim_wait_us_u64 =
+              static_cast<std::uint64_t>(no_victim_wait_us);
+          no_victim_wait_total_us_.fetch_add(no_victim_wait_us_u64);
+          auto current_max = no_victim_wait_max_us_.load();
+          while (no_victim_wait_us_u64 > current_max &&
+                 !no_victim_wait_max_us_.compare_exchange_weak(
+                     current_max, no_victim_wait_us_u64)) {
           }
           evict_expert_node = FindExpertEvict(gpu_id);
         }
@@ -421,6 +456,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                    cache_sizes_[gpu_id], " incache count ",
                    cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
                    " expert_idx ", expert_idx);
+        eviction_count_.fetch_add(1);
 
         auto evict_node = evict_expert_node->node;
         evict_node->SetDevice(evict_node->default_host);
