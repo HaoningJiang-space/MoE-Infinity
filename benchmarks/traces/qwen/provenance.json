@@ -1,0 +1,14 @@
+{
+  "source_json": "/data/ziheng/projects/moe_infinity_fgo/benchmarks/traces/qwen/source_lmsys_eval_prompts.json",
+  "model_path": "/data/ziheng/hf_models/Qwen1.5-MoE-A2.7B-Chat",
+  "max_input_length": 128,
+  "seed": 42,
+  "trace_length": 34,
+  "safe_prompt_count": 41,
+  "token_budget_prompt_count": 28,
+  "trace_names": [
+    "mixed",
+    "recurrence_heavy",
+    "stationary"
+  ]
+}
