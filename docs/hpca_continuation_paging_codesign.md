@@ -1,4 +1,4 @@
-# HPCA 方向：面向内存超配 MoE 推理的 Progress-Guaranteed Expert Paging
+# HPCA 方向：面向内存超配 MoE 推理的 MoE-Specific Expert Paging
 
 日期：2026-04-27
 
@@ -12,11 +12,11 @@
 - 更好的 prefetch heuristic
 - 更好的 eviction policy
 
-而是：
+更准确的新主线是：
 
-> 内存超配 MoE 推理缺的不是又一个预测器，而是一个有进展保证的 expert paging substrate。  
-> 在强 memory pressure 下，speculative prefetch 会和 demand fetch 抢 cache、抢 victim、抢 PCIe/IO 队列。  
-> 如果 runtime 不区分 blocking demand fault 和 speculative prefetch fault，就会进入 no-victim / all-locked 状态，甚至直接 fatal。
+> 内存超配 MoE 推理缺的不是又一个预测器，也不只是普通的 prefetch throttling。  
+> MoE expert 是一种特殊 page：大粒度、layer-deadline、执行期带锁、候选来自 speculative routing，而且 demand miss 会阻塞 decode critical path。  
+> 因此，普通 UVM / cache prefetch 语义不足，需要 MoE-specific expert paging semantics。
 
 换成大白话：
 
@@ -28,6 +28,11 @@
 因此，HPCA 版本的论文不应叫 `Continuation-Aware Expert Paging`。更合适的标题方向是：
 
 > Progress-Guaranteed Expert Paging for Memory-Oversubscribed MoE Inference
+
+但要注意：
+
+> `progress-guaranteed` 不是自动 non-incremental。  
+> 真正的新意不是“prefetch 会污染 cache”或“demand 应该优先”，而是 MoE expert page fault 的语义和通用 UVM/page prefetch 不一样。
 
 `continuation cache` 仍然重要，但它应该降级为上层 hint source / retrieval abstraction；真正的 HPCA 核心贡献应放到底层 paging 语义和 memory hierarchy co-design。
 
@@ -55,7 +60,36 @@
 所以非 incremental 的边界必须非常清楚：
 
 > 我们不是提出一个更准的 predictor，也不是一个更聪明的 eviction policy。  
-> 我们提出 MoE expert paging 的体系结构语义：speculative prefetch 不能破坏 demand progress；expert cache 必须向 runtime 暴露 evictability、lock、deadline 和 pressure 状态。
+> 我们提出 MoE expert paging 的体系结构语义：expert 是 deadline-bearing、lock-constrained、large-object page；speculative expert traffic 的 admission 必须同时考虑 evictability、lock state、layer deadline 和 demand reserve。
+
+---
+
+## 哪些不能当 novelty
+
+下面这些点在传统体系结构、GPU UVM、cache/prefetch 文献里都不是新问题。可以作为背景压力，但不能当论文核心新意：
+
+- demand 优先于 prefetch
+- prefetch 可以 drop / defer / throttle
+- cache pollution
+- bandwidth waste
+- reserved free buffer
+- prefetch accuracy / timeliness feedback
+- prefetch 和 eviction coordination
+- proactive eviction
+- page migration / oversubscription 管理
+
+如果只写这些，审稿人很容易说：
+
+> 这是把已有 UVM/prefetch/paging 技术套到 MoE expert cache 上。
+
+必须把 novelty 收紧到 MoE expert 的特殊 fault model：
+
+- expert 是大粒度对象，不是 4KB/2MB 普通 page。
+- expert 有 layer deadline，晚到就等于 miss。
+- expert 执行期会被锁住，锁状态直接影响 evictability。
+- expert candidate 来自 routing speculation，不是 regular stride 或普通 locality。
+- demand expert miss 会阻塞 autoregressive decode critical path。
+- 多个 future-layer prefetch 会制造 cancelable speculative traffic。
 
 ---
 
@@ -134,7 +168,7 @@ v10b strong-pressure run 的关键现象：
 
 1. **候选正确性**：未来要用的 expert 不能在 candidate generation 阶段被漏掉。
 2. **deadline 可达性**：prefetch 不是只要猜对就行，还要在对应 layer 执行前到达。
-3. **demand progress**：无论 prefetch 多激进，blocking demand fetch 不能被 speculative traffic 卡死。
+3. **MoE-specific progress**：无论 prefetch 多激进，blocking expert demand fault 不能被 speculative routing traffic 推入 no-victim / all-locked 状态。
 
 现有很多工作主要优化第 1 点或第 2 点：
 
@@ -145,23 +179,111 @@ v10b strong-pressure run 的关键现象：
 
 我们的 HPCA 版本要主打第 3 点，并把前两点连接起来：
 
-> 当 retrieval object 从 sequence-level 改成 local continuation 后，candidate omission 被缓解，但更激进、更局部的 prefetch 会把系统推向新的瓶颈：evictability metadata、queue priority、reserved capacity 和 no-victim progress。  
-> 因此，需要一个 progress-guaranteed expert paging substrate。
+> 当 retrieval object 从 sequence-level 改成 local continuation 后，candidate omission 被缓解，但更激进、更局部的 prefetch 会把系统推向新的瓶颈：expert evictability、execution lock state、layer deadline、demand reserve 和 no-victim progress。  
+> 因此，需要 MoE-specific expert paging semantics，而不是简单复用普通 UVM/prefetch 语义。
+
+---
+
+## MoE expert paging fault model
+
+这应该成为 HPCA 论文的核心抽象。
+
+一个 expert miss 不是普通 cache miss，而是：
+
+> 一个大粒度、deadline-bearing、lock-constrained、speculation-fed page fault。
+
+具体包含五个字段：
+
+- `object_size`: expert weight 很大，迁移成本高，不能按普通 cache line/page 思维处理。
+- `layer_deadline`: expert 必须在目标 MoE layer 执行前到达，晚到就是 blocking stall。
+- `lock_state`: expert 执行期间不可驱逐，lock state 决定 evictable set。
+- `fault_type`: demand fault 是 blocking；prefetch fault 是 speculative/cancelable。
+- `routing_confidence/source`: candidate 来自 routing continuation 或其他 predictor，存在错和晚的风险。
+
+这组语义才是和通用 prefetch/UVM 区分开的地方。
+
+---
+
+## 真正可能新的机制点
+
+### 1. evictability-aware admission
+
+prefetch admission 不能只看预测分数、带宽、cache occupancy。
+
+它还必须看：
+
+- evictable-set size
+- locked expert count
+- demand reserve 是否被占用
+- candidate layer deadline
+- prefetch 是否仍可取消
+- demand queue 是否已经积压
+
+这比普通 prefetch throttling 更 MoE-specific，因为 expert 的 evictability 被执行锁和 layer-local deadline 共同决定。
+
+### 2. lock-aware expert page metadata
+
+CPE 维护的不是普通 resident bit，而是 expert-level metadata：
+
+- resident
+- locked
+- evictable
+- deadline
+- demand-reserved
+- cancelable-prefetch
+
+这样 runtime 可以知道：
+
+- 哪些 expert 真的能驱逐
+- 哪些 prefetch 可以取消
+- 哪些 demand fault 必须保底
+
+### 3. deadline-bearing prefetch descriptor
+
+prefetch descriptor 需要带：
+
+- target layer
+- latest-arrival deadline
+- candidate source
+- usefulness score
+- cancelability
+
+这样 prefetch 不只是“提前搬”，而是“在 deadline 前搬；过期则取消或降级”。
+
+### 4. demand-reserved expert capacity
+
+reserved capacity 本身不新。
+
+MoE-specific 的地方是：
+
+- reserve 是给 blocking expert demand fault 的。
+- reserve admission 要看 expert lock/evictability。
+- reserve 被 speculative expert traffic 侵占时会直接破坏 decode progress。
+
+### 5. object-level evidence bridge
+
+v9 证明 sequence/request-level retrieval object 会造成 candidate omission。
+
+v10b 证明更 aggressive 的 local hint 会暴露底层 paging progress 问题。
+
+这两个证据要连起来：
+
+> 上层 retrieval object 修对之后，系统不是结束了，而是把 bottleneck 推到底层 expert paging substrate。  
+> 这就是为什么本文不是 predictor paper，而是 memory hierarchy contract paper。
 
 ---
 
 ## 论文主张草案
 
-可以这样写：
+更锋利的版本应该这样写：
 
-> Existing MoE offloading systems treat speculative expert prefetch and blocking expert demand fetch as ordinary cache traffic. Under strong memory pressure, this breaks progress: prefetch can occupy cache capacity, lock victim candidates, and contend for transfer queues, leaving demand fetch with no evictable victim. We propose a progress-guaranteed expert paging substrate that separates demand and prefetch semantics, exposes evictability metadata, reserves demand capacity, and performs deadline-aware admission. Continuation retrieval is used as an upper-layer hint source, while the core contribution is the paging substrate that preserves demand progress under speculative MoE expert traffic.
+> Existing MoE offloading systems optimize expert prediction and scheduling, but lack a paging contract for speculative expert traffic. We show that under memory pressure, even correct speculation can break progress because MoE experts are large, locked during execution, and constrained by layer deadlines. We propose a MoE-specific expert paging substrate with evictability-aware admission, lock-aware expert metadata, cancelable deadline-bearing prefetch descriptors, and demand-reserved capacity.
 
 中文版本：
 
-> 现有 MoE offloading 系统通常把 speculative expert prefetch 和 blocking expert demand fetch 都当成普通缓存请求。  
-> 在强 memory pressure 下，这会破坏进展：prefetch 可能占住 cache、锁住 victim、挤占传输队列，导致 demand fetch 找不到可驱逐对象。  
-> 我们提出一个有进展保证的 expert paging substrate：区分 demand/prefetch 语义，暴露 evictability metadata，保留 demand capacity，并做 deadline-aware admission。  
-> continuation retrieval 只是上层 hint source；核心贡献是让 speculative MoE expert traffic 不破坏 demand progress。
+> 现有 MoE offloading 系统主要优化 expert prediction 和 scheduling，但缺少 speculative expert traffic 的 paging contract。  
+> 我们证明，在强 memory pressure 下，即使预测是对的，也可能破坏 progress，因为 MoE expert 是大对象、执行期带锁、并受 layer deadline 约束。  
+> 我们提出 MoE-specific expert paging substrate：evictability-aware admission、lock-aware expert metadata、可取消的 deadline-bearing prefetch descriptor，以及 demand-reserved capacity。
 
 ---
 
@@ -180,7 +302,19 @@ v10b strong-pressure run 的关键现象：
 
 v10b 的 fatal log 是 motivation，但不够。需要把它扩展成可量化 characterization。
 
-### 贡献 2：progress-guaranteed paging semantics
+### 贡献 2：MoE expert paging fault model
+
+定义 expert miss 为什么不是普通 page/cache miss：
+
+- large-object
+- layer-deadline
+- lock-constrained
+- speculation-fed
+- demand-blocking
+
+这部分是 non-incremental 边界，必须比“prefetch 会污染 cache”更靠前。
+
+### 贡献 3：progress-guaranteed paging semantics
 
 定义 expert paging 的最小 runtime contract：
 
@@ -190,17 +324,17 @@ v10b 的 fatal log 是 motivation，但不够。需要把它扩展成可量化 c
 - victim selection 必须有 ownership 或 revalidation。
 - no-victim 不能直接 fatal，只能 wait/recheck/drop/defer/diagnose。
 
-### 贡献 3：硬件/软件协同 substrate
+### 贡献 4：硬件/软件协同 substrate
 
 提出一个小而克制的 paging substrate，不做大 accelerator：
 
-- demand/prefetch queue isolation
-- reserved demand cache capacity
-- hardware-visible pressure counters
-- fast evictable-set metadata
-- deadline-aware prefetch admission
+- evictability-aware admission
+- lock-aware expert metadata
+- cancelable deadline-bearing prefetch descriptors
+- demand-reserved expert capacity
+- hardware-visible expert pressure counters
 
-### 贡献 4：continuation hint 的作用边界
+### 贡献 5：continuation hint 的作用边界
 
 continuation cache 的定位是：
 
@@ -256,42 +390,51 @@ prefetch 不应该和 demand fetch 平权。
 
 ## 硬件相关机制
 
-### 1. demand / prefetch 队列隔离
+下面机制要写成 MoE-specific expert paging semantics，而不是泛泛的 prefetch queue 管理。
 
-demand fetch 和 prefetch 应该进入不同 priority queue。
+### 1. fault-type aware queue
 
-目标：
-
-- demand 不被 speculative traffic 阻塞。
-- prefetch 可以被降级、合并、取消。
-- deadline 近的请求优先级更高。
-
-### 2. reserved demand capacity
-
-cache 里保留少量 demand-only slots。
+demand expert fault 和 speculative expert prefetch fault 应该进入不同语义队列。
 
 目标：
 
-- prefetch 不能占满全部 cache。
-- 即使 aggressive prefetch 失控，demand 仍有最小进展空间。
+- blocking demand fault 不被 speculative routing traffic 阻塞。
+- prefetch descriptor 可以根据 layer deadline 被取消、降级、合并。
+- deadline 已经过期的 prefetch 不继续占 transfer queue。
 
-### 3. hardware-visible pressure counters
+注意：队列优先级本身不是新意。MoE-specific 的地方是 queue entry 带有 expert deadline、lock/evictable state 和 cancelability。
+
+### 2. demand-reserved expert capacity
+
+cache 里保留少量 demand-only expert slots。
+
+目标：
+
+- speculative expert traffic 不能占满全部 expert cache。
+- demand reserve 的释放和 expert lock state / evictable state 绑定。
+- 即使 aggressive local continuation prefetch 失控，blocking demand fault 仍有最小进展空间。
+
+注意：reserved buffer 本身不是新意。MoE-specific 的地方是 reserve 面向 blocking expert fault，而 expert 的可驱逐性由执行锁决定。
+
+### 3. expert-state pressure counters
 
 runtime 需要看到这些状态：
 
-- cache occupancy
+- expert cache occupancy
 - in-flight transfer count
-- locked-node count
-- evictable-node count
+- locked expert count
+- evictable expert count
 - no-victim wait time
 - prefetch drop/defer count
 - demand/prefetch conflict count
+- expired prefetch count
+- cancelable prefetch count
 
 这些 counter 的作用不是为了好看，而是为了 admission control：
 
-> 在到达 fatal 边界之前，就把 prefetch 降速、丢弃或延后。
+> 在到达 no-victim/all-locked 边界之前，就把 speculative expert prefetch 降速、丢弃、取消或延后。
 
-### 4. fast evictable-set metadata
+### 4. lock-aware evictable-set metadata
 
 当前软件路径需要扫描 metadata、尝试锁、再决定 victim。
 
@@ -301,6 +444,8 @@ runtime 需要看到这些状态：
 - victim queue
 - per-layer priority metadata
 - lock/evictable bitmap
+- deadline-indexed resident expert list
+- cancelable prefetch descriptor list
 
 目标：
 
@@ -316,27 +461,31 @@ runtime 需要看到这些状态：
 
 注意：CPE 不应该被写成“大型 MoE accelerator”。它只是 expert paging substrate。
 
-### 1. continuation hint buffer
+### 1. expert fault descriptor buffer
 
-保存当前局部 hint：
+保存当前 expert fault / prefetch descriptor：
 
-- 当前 decode step
-- 当前 layer
-- 最近几层 local routing prefix
-- continuation cache 返回的候选 expert 和 deadline
+- fault type: demand 或 speculative prefetch
+- expert object id
+- object size
+- target layer deadline
+- lock/evictable state
+- cancelability
+- hint source: continuation cache 或其他 predictor
 
 作用：
 
-- 让 runtime 不必反复重建 key。
-- 让 prefetch hint 更接近 transfer scheduling path。
+- 让 paging substrate 直接看到 MoE-specific fault semantics。
+- 让 prefetch 不再只是普通异步拷贝，而是带 deadline 和 cancelability 的 expert object fault。
 
-### 2. deadline-aware admission
+### 2. evictability-aware admission
 
 对每个 prefetch candidate 判断：
 
 - deadline 是否够近
 - 当前 transfer queue 是否拥塞
 - evictable set 是否足够
+- locked expert 是否过多
 - demand reserve 是否被侵占
 - candidate usefulness 是否足够高
 
@@ -346,7 +495,7 @@ runtime 需要看到这些状态：
 - defer
 - 或降低优先级
 
-### 3. evictable metadata path
+### 3. lock-aware metadata path
 
 维护低开销 metadata：
 
@@ -398,6 +547,10 @@ runtime 需要看到这些状态：
 - `demand_prefetch_conflict_count`
 - eviction count
 - cache hit/miss fetch count
+- locked expert count snapshot
+- evictable expert count snapshot
+- expired prefetch count
+- cancelable prefetch count
 
 当前已经加了一部分 dispatcher counters，但 v10 运行时没有使用 inplace rebuild，所以 v10 不能拿这些 counter 当证据。后续要重新 build/install 后跑 canary。
 
@@ -417,6 +570,10 @@ runtime 需要看到这些状态：
 - aggressive prefetch 不一定变快，但 demand progress 保住。
 - prefetch drop/defer 随 pressure 上升而上升。
 - no-victim wait 从 fatal log 变成可量化指标。
+
+这一步不能只写成“修了一个 bug”。论文里要把它解释为：
+
+> demand expert fault 的 progress contract 被明确化；speculative expert prefetch 被降级为 cancelable/best-effort traffic。
 
 ### Stage 4：跑 post-fix 三类实验
 
@@ -452,10 +609,11 @@ robustness boundary：
 比较：
 
 - 纯软件 local continuation
-- 软件 + demand/prefetch queue priority
-- 软件 + reserved demand slots
-- 软件 + fast evictable metadata
-- 软件 + deadline-aware admission
+- 软件 + fault-type aware queue
+- 软件 + demand-reserved expert capacity
+- 软件 + lock-aware evictable metadata
+- 软件 + evictability-aware admission
+- 软件 + cancelable deadline-bearing prefetch descriptors
 
 模型输入来自真实 counter：
 
@@ -463,10 +621,20 @@ robustness boundary：
 - transfer queue occupancy
 - no-victim wait
 - evictable count
+- locked expert count
 - drop/defer rate
 - demand/prefetch conflict
+- expired/canceled prefetch count
 
 这样可以先证明 architecture substrate 的价值，而不是过早承诺硬件实现。
+
+关键图不应该只是 “CPE 更快”。应拆成：
+
+- queue isolation 单独带来多少 tail latency 改善
+- demand reserve 单独减少多少 no-victim event
+- lock-aware metadata 单独降低多少 victim discovery latency
+- deadline admission 单独减少多少 expired / late prefetch
+- 组合后是否同时保持 candidate recall 和 demand progress
 
 ---
 
@@ -495,6 +663,9 @@ robustness boundary：
 - demand/prefetch conflict count
 - evictable-node count snapshot
 - locked-node count snapshot
+- expired prefetch count
+- canceled prefetch count
+- late prefetch count
 
 ### P2：补 timing breakdown
 
@@ -513,6 +684,8 @@ runtime 层：
 - execution wait
 - no-victim wait
 - deadline miss
+- victim discovery latency
+- lock wait latency
 
 ### P3：实现 progress semantics
 
@@ -557,10 +730,10 @@ victim：
 
 更稳的 HPCA 版本是：
 
-> MoE expert paging needs progress-guaranteed memory hierarchy semantics.  
-> Continuation cache shows how to generate better local hints, but strong memory pressure exposes a deeper substrate problem: speculative prefetch must not break demand progress.  
-> We co-design demand/prefetch priority, reserved demand capacity, evictable metadata, and deadline-aware admission to make expert paging robust and efficient.
+> MoE expert paging needs MoE-specific memory hierarchy semantics.  
+> An expert miss is a large-object, layer-deadline, lock-constrained, speculation-fed page fault.  
+> Continuation cache shows how to generate better local hints, but strong memory pressure exposes a deeper substrate problem: speculative expert traffic must be admitted based on evictability, lock state, deadline, and demand reserve.
 
 中文一句话：
 
-> 这篇不要讲“我预测 expert 更准”，要讲“MoE expert paging 需要一种新的内存层级语义：prefetch 可以投机，但 demand 必须有进展保证”。
+> 这篇不要讲“我预测 expert 更准”，也不要只讲“prefetch 要节流”；要讲“MoE expert 是一种特殊 page，所以 expert paging 需要不同于普通 UVM/prefetch 的内存层级语义”。
