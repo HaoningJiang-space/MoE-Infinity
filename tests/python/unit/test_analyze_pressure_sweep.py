@@ -3,7 +3,34 @@ import json
 from benchmarks.analyze_pressure_sweep import build_summary
 
 
-def _write_raw(path, *, trace, variant, tok_s, hit_rate, evictions=0):
+def _write_raw(
+    path,
+    *,
+    trace,
+    variant,
+    tok_s,
+    hit_rate,
+    evictions=0,
+    include_progress_counters=True,
+):
+    dispatcher_stats = {
+        "enqueue_count": 10,
+        "busy_wait_count": 0,
+        "busy_wait_total_wait_us": 0,
+        "busy_wait_max_wait_us": 0,
+    }
+    if include_progress_counters:
+        dispatcher_stats.update(
+            {
+                "cache_hit_fetch_count": 10,
+                "cache_miss_fetch_count": 0,
+                "eviction_count": evictions,
+                "all_locked_event_count": 0,
+                "no_victim_wait_count": 0,
+                "no_victim_wait_total_us": 0,
+                "no_victim_wait_max_us": 0,
+            }
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -27,6 +54,7 @@ def _write_raw(path, *, trace, variant, tok_s, hit_rate, evictions=0):
                     "mean_dispatcher_no_victim_wait_count": 0.0,
                     "mean_dispatcher_no_victim_wait_total_us": 0.0,
                 },
+                "records": [{"dispatcher_stats": dispatcher_stats}],
             }
         ),
         encoding="utf-8",
@@ -41,6 +69,7 @@ def test_build_summary_handles_partial_sweep_and_local_comparison(tmp_path):
         variant="history_reuse_consensus_backbone",
         tok_s=10.0,
         hit_rate=1.0,
+        include_progress_counters=False,
     )
     _write_raw(
         ratio / "raw" / "mixed__history_reuse_local_backbone.json",
@@ -48,6 +77,7 @@ def test_build_summary_handles_partial_sweep_and_local_comparison(tmp_path):
         variant="history_reuse_local_backbone",
         tok_s=12.0,
         hit_rate=1.0,
+        include_progress_counters=False,
     )
     running_log = ratio / "logs" / "mixed__on_demand.log"
     running_log.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +99,7 @@ def test_build_summary_handles_partial_sweep_and_local_comparison(tmp_path):
     assert coverage["partial"] == 1
     assert coverage["non_pressure"] == 2
     assert coverage["unknown_pressure"] == 1
+    assert summary["cases"][0]["has_progress_counters"] is False
     assert summary["comparisons"][0]["tokens_per_second_delta_pct"] == 20.0
 
 

@@ -96,8 +96,25 @@ def _case_status(raw_path: Path, log_path: Path) -> str:
     return "partial"
 
 
-def _progress_counters_available(aggregate: Mapping[str, Any]) -> bool:
-    return "dispatcher_eviction_count_total" in aggregate
+def _progress_counters_available(raw: Mapping[str, Any]) -> bool:
+    progress_counter_keys = {
+        "cache_hit_fetch_count",
+        "cache_miss_fetch_count",
+        "eviction_count",
+        "all_locked_event_count",
+        "no_victim_wait_count",
+        "no_victim_wait_total_us",
+        "no_victim_wait_max_us",
+    }
+    return any(
+        bool(
+            progress_counter_keys.intersection(
+                record.get("dispatcher_stats", {}).keys()
+            )
+        )
+        for record in raw.get("records", [])
+        if isinstance(record, Mapping)
+    )
 
 
 def _pressure_label(
@@ -144,7 +161,7 @@ def _case_summary(
         ),
         "raw_path": str(raw_path) if raw_path.is_file() else None,
         "log_path": str(log_path) if log_path.is_file() else None,
-        "has_progress_counters": _progress_counters_available(aggregate),
+        "has_progress_counters": _progress_counters_available(raw),
         "aggregate": aggregate,
         "fixed_new_tokens": raw.get("fixed_new_tokens"),
         "max_new_tokens": raw.get("max_new_tokens"),
