@@ -1,453 +1,393 @@
-# HPCA Direction: Continuation-Aware Expert Paging Co-Design
+# HPCA 方向：面向内存超配 MoE 推理的 Progress-Guaranteed Expert Paging
 
-Date: 2026-04-27
+日期：2026-04-27
 
-## Purpose
+## 核心转向
 
-This note reframes the current `continuation cache` line for an HPCA-style hardware/software co-design paper.
+这份文档把原来的 `continuation cache / continuation-aware paging` 方向，重构成更适合 HPCA 的硬件/软件协同故事。
 
-The key shift is:
+新的主线不是：
 
-- not `better predictor`
-- not `better paging heuristic`
-- but `metadata / lookup / scheduling co-design for decode-time MoE expert paging`
+- 更好的 expert predictor
+- 更好的 prefetch heuristic
+- 更好的 eviction policy
 
----
+而是：
 
-## One-Sentence Thesis
+> 内存超配 MoE 推理缺的不是又一个预测器，而是一个有进展保证的 expert paging substrate。  
+> 在强 memory pressure 下，speculative prefetch 会和 demand fetch 抢 cache、抢 victim、抢 PCIe/IO 队列。  
+> 如果 runtime 不区分 blocking demand fault 和 speculative prefetch fault，就会进入 no-victim / all-locked 状态，甚至直接 fatal。
 
-The dominant hidden failure mode in decode-time MoE expert paging is **retrieval-object mismatch**:
+换成大白话：
 
-> request-level or sequence-level traces are too coarse for layer-local prefetch deadlines.
+- demand fetch 是“现在不用这个 expert 就走不下去”。
+- prefetch 是“猜测未来可能要用，提前搬一下”。
+- 这两类请求不能平权。
+- prefetch 可以失败、丢弃、延后；demand fetch 必须保证能继续前进。
 
-Once the retrieval object is corrected to a `local continuation` object, the bottleneck shifts from candidate omission to:
+因此，HPCA 版本的论文不应叫 `Continuation-Aware Expert Paging`。更合适的标题方向是：
 
-- metadata lookup latency
-- continuation aggregation overhead
-- transfer scheduling and deadline management
-- runtime progress under no-victim / all-locked cache pressure
+> Progress-Guaranteed Expert Paging for Memory-Oversubscribed MoE Inference
 
-This opens a hardware/software co-design opportunity.
-
----
-
-## What We Are Not Writing
-
-This should **not** be framed as:
-
-- a better expert predictor
-- a better utility estimator
-- a better cache heuristic
-- a semantic expert specialization paper
-
-Those framings are too crowded and too incremental for HPCA.
+`continuation cache` 仍然重要，但它应该降级为上层 hint source / retrieval abstraction；真正的 HPCA 核心贡献应放到底层 paging 语义和 memory hierarchy co-design。
 
 ---
 
-## Current Empirical Position
+## 为什么不能主打 continuation predictor
 
-The current software line has already established several facts:
+如果论文写成：
 
-1. `candidate omission gap` is consistently larger than `restricted gap`
-   - the dominant loss happens before ranking/scheduling
-   - controller refinement is secondary
+> continuation cache + 更好的 expert prefetch
 
-2. `local continuation object` improves same-step candidate quality substantially
-   - sequence-level retrieval asks the wrong question
-   - layer-local continuation retrieval better matches decode-time paging deadlines
+很容易被打成 incremental。
 
-3. the first local implementation was too slow, but acceleration fixed the main software bottleneck
-   - local retrieval semantics are viable
-   - remaining overhead is implementation-path dependent, not evidence that the object is wrong
+原因是相邻工作已经非常拥挤：
 
-4. current runtime validation is moving toward pressure-sensitive fixed-length evaluation
-   - this is the correct bridge from observation to architecture
+- MoE-Infinity 已经做 request-level trace-guided expert cache/prefetch。
+- ProMoE 已经做 proactive caching。
+- FineMoE / fMoE 已经做 fine-grained pattern 和 semantic hints。
+- DuoServe-MoE 已经在 decode 阶段做 lightweight layer-level predictor。
+- LayerScope / PreScope 已经讲 layer-aware predictor、cross-layer scheduling、PCIe bandwidth competition 和 AsyncIO。
+- ActiveEvict 已经讲 eviction/loading critical path 解耦。
+- SpecMD 已经把 cache policy、eviction policy 和硬件约束放进 benchmark。
+- MoE-SpeQ 已经把 speculative execution 和 expert offloading 做 co-design。
 
-In short:
+所以非 incremental 的边界必须非常清楚：
 
-> the software evidence already supports object mismatch as the primary failure mode.
-
-What remains is to show that:
-
-> once the object is fixed, the next bottleneck is the metadata path itself, and that bottleneck benefits from co-design.
+> 我们不是提出一个更准的 predictor，也不是一个更聪明的 eviction policy。  
+> 我们提出 MoE expert paging 的体系结构语义：speculative prefetch 不能破坏 demand progress；expert cache 必须向 runtime 暴露 evictability、lock、deadline 和 pressure 状态。
 
 ---
 
-## HPCA Problem Statement
+## 当前证据链怎么放
 
-### The real systems problem
+当前软件实验已经证明了第一层问题：retrieval object mismatch。
 
-Decode-time MoE paging must answer a highly local question:
+### 1. object mismatch 是一级瓶颈
 
-> given the current token and current layer, which experts are likely needed in the next few layers, and can they be transferred before their deadlines?
+v6/v7/v8/v9 的共同结论是：
 
-Sequence-level trace abstractions are poorly aligned with this question.
+- `candidate omission gap` 明显大于 `restricted gap`。
+- 正确 expert 经常在排序之前就没进候选集合。
+- 因此，controller/ranking 再复杂也救不回来。
+- sequence/request-level trace 与 layer-local decode-time deadline 不对齐。
+- local continuation object 更接近 runtime 真正要执行的动作。
 
-### The architecture consequence
+v9 是目前最干净的 object-vs-controller 证据：
 
-Once retrieval is made local and continuation-centric, software pays a new cost:
+- local continuation + simple ranking 的 same-step M32 pair recall 约 `0.466-0.480`。
+- sequence object + simple/topk/consensus/recent retrieval 只有约 `0.176-0.226`。
+- local continuation 的 omission gap 约 `0.487-0.503`。
+- sequence object 的 omission gap 约 `0.680-0.737`。
 
-- constructing local keys
-- searching continuation metadata
-- aggregating continuation values
-- turning retrieved continuation into prefetch descriptors
-- scheduling transfers under deadlines and queue contention
+这说明：
 
-This is no longer just a `prediction` problem.
+> 先换 retrieval object，比继续调 controller 更重要。
 
-It becomes a **metadata-path and transfer-scheduling problem**, which is architecture-relevant.
+### 2. v10 目前说明 ratio_060 是 control 点
 
----
+v10 fixed-length pressure sweep 正在跑。当前已完成的 `ratio_060` 部分显示：
 
-## Proposed HPCA Claim
+- cache hit rate 基本都是 `1.0`。
+- busy wait 是 `0`。
+- 已完成 case 都被标记为 `non-pressure/control`。
 
-The paper should claim something like:
+这说明：
 
-> Existing MoE paging systems retrieve history at the wrong granularity, causing oracle experts to be omitted before scheduling begins.  
-> We show that layer-local continuation retrieval fixes this dominant miss source, but shifts the bottleneck to metadata lookup and deadline-aware transfer scheduling.  
-> We co-design a continuation-aware paging substrate that makes local continuation retrieval and expert transfer hardware-efficient.
+> `ratio_060` 不是强 paging-pressure 点。  
+> 它适合当 control，不适合证明 paging bottleneck 或 prefetch 在压力下有效。
 
-This is stronger than:
+当前 partial 分析报告：
 
-- “we have a better predictor”
-- “we have a better scheduler”
+- `/data/ziheng/moe_infinity_fgo_runs/phasea_v10_runtime_fixedlen_qwen_pressure_sweep/analysis/pressure_sweep_summary.md`
 
-because it identifies:
+### 3. v10b 暴露了第二层问题：runtime progress
 
-1. the hidden failure mode
-2. the correct runtime object
-3. the new post-fix bottleneck
-4. the co-design mechanism
+v10b strong-pressure run 的关键现象：
 
----
+- 配置：`device_memory_ratio=0.30`
+- prefetch：`future_layers=4`, `max_candidates=32`
+- trace/variant：`mixed / history_reuse_local_backbone`
+- failure：`ExpertDispatcher::GPUFetchFunc: evict_node is nullptr`
+- 前置症状：`All cached expert locked, waiting for cache to be available`
 
-## Architecture Insight
+这不是 CUDA OOM。
 
-### Before object correction
+它说明：
 
-The main problem is:
+> demand fetch 需要 cache slot，但当前 evictable candidate set 暂时为空。  
+> 当前 runtime 只等一次，然后把“暂时没有 victim”当成不可恢复错误。
 
-- correct experts never enter the candidate set
+这正是 HPCA 切入口：
 
-This appears as:
-
-- high omission gap
-- low same-step recall
-
-### After object correction
-
-The main problem becomes:
-
-- software metadata handling cost
-- retrieval lookup latency
-- transfer scheduling under deadlines
-
-This is exactly the point where HPCA becomes natural:
-
-> the software path has identified the right object, but that object exposes a new microarchitectural bottleneck.
+- 当前系统把 expert cache 当成普通软件缓存。
+- 但 MoE decode 里的 expert 更像 deadline-bearing page。
+- demand fetch 是 blocking page fault。
+- prefetch 是 speculative page fault。
+- 两者不能共享同一套无优先级、无 reserve、无 progress contract 的路径。
 
 ---
 
-## New Runtime-Progress Evidence From v10b
+## 新的 HPCA problem statement
 
-The strong-pressure v10b run exposed a separate issue from prediction quality:
+内存超配 MoE 推理中的 expert paging 需要同时满足三件事：
 
-- configuration: `device_memory_ratio=0.30`, `prefetch_future_layers=4`, `prefetch_max_candidates=32`
-- trace/variant at failure: `mixed`, `history_reuse_local_backbone`
-- failure mode: `ExpertDispatcher::GPUFetchFunc: evict_node is nullptr`
-- preceding symptom: `All cached expert locked, waiting for cache to be available`
+1. **候选正确性**：未来要用的 expert 不能在 candidate generation 阶段被漏掉。
+2. **deadline 可达性**：prefetch 不是只要猜对就行，还要在对应 layer 执行前到达。
+3. **demand progress**：无论 prefetch 多激进，blocking demand fetch 不能被 speculative traffic 卡死。
 
-This is not a CUDA OOM result. It is a runtime progress failure:
+现有很多工作主要优化第 1 点或第 2 点：
 
-> a demand fetch needs cache space, but the currently evictable candidate set is temporarily empty; the runtime waits once and then treats the condition as fatal.
+- predictor 更准
+- cache policy 更好
+- eviction 更聪明
+- prefetch/scheduling 更激进
 
-This matters because it separates two problems:
+我们的 HPCA 版本要主打第 3 点，并把前两点连接起来：
 
-1. `retrieval-object mismatch`: the original candidate-generation failure, measured by omission gap.
-2. `runtime progress under pressure`: the post-retrieval execution failure, exposed only when prefetch and demand traffic contend for a small expert cache.
-
-For paper framing, v10b should not be used as a normal performance point. It should be treated as a robustness boundary:
-
-- normal performance sweep: use stable pressure points such as `0.40/0.35`, or use conservative `0.30` with smaller prefetch windows.
-- robustness stress case: keep `0.30 + future_layers=4 + max_candidates=32` to show where the current runtime loses progress.
-
-The main lesson is:
-
-> hardware cannot replace the software progress fix, but the crash exposes exactly the pressure signals and queue conflicts that an HPCA-style paging substrate should manage.
+> 当 retrieval object 从 sequence-level 改成 local continuation 后，candidate omission 被缓解，但更激进、更局部的 prefetch 会把系统推向新的瓶颈：evictability metadata、queue priority、reserved capacity 和 no-victim progress。  
+> 因此，需要一个 progress-guaranteed expert paging substrate。
 
 ---
 
-## Required Software Progress Semantics
+## 论文主张草案
 
-Before claiming hardware help, the software runtime needs a correct progress contract.
+可以这样写：
 
-### 1. Demand fetch must make progress
+> Existing MoE offloading systems treat speculative expert prefetch and blocking expert demand fetch as ordinary cache traffic. Under strong memory pressure, this breaks progress: prefetch can occupy cache capacity, lock victim candidates, and contend for transfer queues, leaving demand fetch with no evictable victim. We propose a progress-guaranteed expert paging substrate that separates demand and prefetch semantics, exposes evictability metadata, reserves demand capacity, and performs deadline-aware admission. Continuation retrieval is used as an upper-layer hint source, while the core contribution is the paging substrate that preserves demand progress under speculative MoE expert traffic.
 
-If no victim is immediately available:
+中文版本：
 
-- wait and recheck in a loop
-- tolerate spurious condition-variable wakeups
-- emit bounded diagnostics if the wait is long
-- do not fatal just because the evictable set is temporarily empty
-
-### 2. Prefetch is best-effort
-
-Prefetch should not compete with demand fetch as a hard requirement. Under no-victim pressure:
-
-- drop prefetch
-- defer prefetch
-- or throttle prefetch admission
-
-The runtime must never let speculative prefetch make demand fetch lose progress.
-
-### 3. Victim selection needs ownership or revalidation
-
-`FindExpertEvict()` should not merely observe a candidate and release its lock. The runtime needs one of:
-
-- hold the victim lock until eviction completes
-- or revalidate atomically before eviction
-
-Otherwise victim selection has a TOCTOU window under concurrent execution and prefetch.
+> 现有 MoE offloading 系统通常把 speculative expert prefetch 和 blocking expert demand fetch 都当成普通缓存请求。  
+> 在强 memory pressure 下，这会破坏进展：prefetch 可能占住 cache、锁住 victim、挤占传输队列，导致 demand fetch 找不到可驱逐对象。  
+> 我们提出一个有进展保证的 expert paging substrate：区分 demand/prefetch 语义，暴露 evictability metadata，保留 demand capacity，并做 deadline-aware admission。  
+> continuation retrieval 只是上层 hint source；核心贡献是让 speculative MoE expert traffic 不破坏 demand progress。
 
 ---
 
-## Hardware-Relevant Pressure Mechanisms
+## 目标贡献
 
-The v10b failure suggests four concrete co-design mechanisms.
+### 贡献 1：failure characterization
 
-### 1. Demand / prefetch queue separation
+证明强 pressure 下的关键失败不是预测准确率，而是 progress failure：
 
-Demand fetches need priority over prefetch traffic. A continuation-aware paging substrate should expose separate queues or priorities so prefetch cannot starve demand.
+- no-victim wait
+- all-locked expert cache
+- demand/prefetch conflict
+- prefetch 占用 cache slot
+- prefetch 与 demand 抢 transfer queue
+- software victim scan / try-lock 路径过慢或不稳定
 
-### 2. Reserved demand capacity
+v10b 的 fatal log 是 motivation，但不够。需要把它扩展成可量化 characterization。
 
-Keep a small reserve for demand fetches. Prefetch should use opportunistic capacity, not all capacity.
+### 贡献 2：progress-guaranteed paging semantics
 
-### 3. Hardware-visible pressure counters
+定义 expert paging 的最小 runtime contract：
 
-Useful signals include:
+- demand fetch 必须有进展保证。
+- prefetch 是 best-effort。
+- prefetch admission 必须受 pressure 控制。
+- victim selection 必须有 ownership 或 revalidation。
+- no-victim 不能直接 fatal，只能 wait/recheck/drop/defer/diagnose。
+
+### 贡献 3：硬件/软件协同 substrate
+
+提出一个小而克制的 paging substrate，不做大 accelerator：
+
+- demand/prefetch queue isolation
+- reserved demand cache capacity
+- hardware-visible pressure counters
+- fast evictable-set metadata
+- deadline-aware prefetch admission
+
+### 贡献 4：continuation hint 的作用边界
+
+continuation cache 的定位是：
+
+- 提供更对齐 layer-local deadline 的 prefetch hint。
+- 证明 sequence-level retrieval object 会造成 candidate omission。
+- 触发更真实的 speculative expert traffic。
+
+但它不是 HPCA 论文的唯一主贡献。
+
+---
+
+## 必须满足的软件 progress 语义
+
+### 1. demand fetch 必须保证继续前进
+
+如果当前没有 victim：
+
+- 不能直接 fatal。
+- 不能只 wait 一次。
+- 必须 `while no victim -> wait/recheck`。
+- 要允许 condition variable 的虚假唤醒。
+- 长时间等待时输出 bounded diagnostics。
+
+这修的是 correctness/progress bug，不是性能优化。
+
+### 2. prefetch 必须是 best-effort
+
+prefetch 不应该和 demand fetch 平权。
+
+在 no-victim 或 cache pressure 高时，prefetch 应该：
+
+- drop
+- defer
+- throttle
+- 或只允许进入 opportunistic capacity
+
+原则是：
+
+> prefetch 可以损失命中率，但不能让 demand fetch 丢 progress。
+
+### 3. victim selection 要有 ownership 或 revalidation
+
+`FindExpertEvict()` 不能只是看一眼谁能 `try_lock`。
+
+选中 victim 后必须满足其中一种：
+
+- 持有 victim lock 直到 eviction 完成。
+- 或 eviction 前立即重新原子校验。
+
+否则就有 TOCTOU：看见能驱逐和真正驱逐之间，状态可能已经变了。
+
+---
+
+## 硬件相关机制
+
+### 1. demand / prefetch 队列隔离
+
+demand fetch 和 prefetch 应该进入不同 priority queue。
+
+目标：
+
+- demand 不被 speculative traffic 阻塞。
+- prefetch 可以被降级、合并、取消。
+- deadline 近的请求优先级更高。
+
+### 2. reserved demand capacity
+
+cache 里保留少量 demand-only slots。
+
+目标：
+
+- prefetch 不能占满全部 cache。
+- 即使 aggressive prefetch 失控，demand 仍有最小进展空间。
+
+### 3. hardware-visible pressure counters
+
+runtime 需要看到这些状态：
 
 - cache occupancy
 - in-flight transfer count
 - locked-node count
 - evictable-node count
 - no-victim wait time
+- prefetch drop/defer count
+- demand/prefetch conflict count
 
-These counters let the runtime throttle prefetch before reaching the fatal boundary.
+这些 counter 的作用不是为了好看，而是为了 admission control：
 
-### 4. Fast evictable-set metadata
+> 在到达 fatal 边界之前，就把 prefetch 降速、丢弃或延后。
 
-The runtime currently has to discover eviction candidates by scanning software metadata and trying locks. A paging substrate could maintain a low-cost evictable set or victim queue.
+### 4. fast evictable-set metadata
 
-This does not replace the software correctness fix. It reduces the frequency and duration of all-locked states.
+当前软件路径需要扫描 metadata、尝试锁、再决定 victim。
 
----
+可以考虑维护：
 
-## Minimal Hardware/Software Co-Design
+- evictable set
+- victim queue
+- per-layer priority metadata
+- lock/evictable bitmap
 
-The co-design should stay small and disciplined.
+目标：
 
-Do **not** jump to a large custom accelerator.
-
-Instead propose a minimal **Continuation Paging Engine (CPE)** with three responsibilities.
-
-### 1. Continuation key buffer
-
-Maintain a small hardware-friendly buffer for the current local continuation key:
-
-- current decode step
-- current anchor layer
-- recent local routing prefix
-
-Goal:
-
-- avoid repeated software-side key reconstruction
-- keep key metadata close to the execution path
-
-### 2. Bucketed continuation lookup
-
-Support exact or near-exact lookup over continuation metadata buckets:
-
-- bucketed by anchor layer
-- compact normalized keys
-- top-k lookup support
-
-Goal:
-
-- reduce lookup latency
-- avoid repeated Python/runtime-side scanning and aggregation overhead
-
-### 3. Deadline-aware transfer queue
-
-Convert retrieved continuation values into transfer descriptors and schedule them by:
-
-- estimated usefulness
-- arrival deadline
-- queue occupancy
-- demand/prefetch priority
-- evictable-cache pressure
-
-Goal:
-
-- reduce late prefetches
-- reduce wasted bandwidth
-- better overlap transfer with expert execution
-- avoid prefetch-induced no-victim states
+- 降低 victim selection latency。
+- 缩短 no-victim 状态持续时间。
+- 减少 all-locked 状态出现概率。
 
 ---
 
-## Why This Is HPCA-Like
+## Minimal CPE：Continuation Paging Engine
 
-This direction naturally emphasizes:
+如果需要一个硬件抽象，可以称为 CPE：Continuation Paging Engine。
 
-- memory hierarchy stress
-- metadata organization
-- queueing and scheduling under deadlines
-- interaction between retrieval granularity and bandwidth efficiency
-- architecture-visible latency breakdown
+注意：CPE 不应该被写成“大型 MoE accelerator”。它只是 expert paging substrate。
 
-It is therefore closer to:
+### 1. continuation hint buffer
 
-- paging substrate design
-- metadata-path acceleration
-- transfer-scheduling co-design
+保存当前局部 hint：
 
-than to:
+- 当前 decode step
+- 当前 layer
+- 最近几层 local routing prefix
+- continuation cache 返回的候选 expert 和 deadline
 
-- systems-only benchmark engineering
-- ML-only prediction improvement
+作用：
+
+- 让 runtime 不必反复重建 key。
+- 让 prefetch hint 更接近 transfer scheduling path。
+
+### 2. deadline-aware admission
+
+对每个 prefetch candidate 判断：
+
+- deadline 是否够近
+- 当前 transfer queue 是否拥塞
+- evictable set 是否足够
+- demand reserve 是否被侵占
+- candidate usefulness 是否足够高
+
+不满足条件则：
+
+- drop
+- defer
+- 或降低优先级
+
+### 3. evictable metadata path
+
+维护低开销 metadata：
+
+- 哪些 expert 当前可驱逐
+- 哪些 expert 被执行路径锁住
+- 哪些 expert 是 demand reserve
+- 哪些 prefetch candidate 可以取消
+
+作用：
+
+- 避免纯软件扫描和 try-lock 造成的长尾。
+- 给 demand fetch 提供更稳定的 victim discovery。
 
 ---
 
-## What the Software Prototype Must Provide
+## 实验路线
 
-The current codebase should now be treated as a **bottleneck finder**.
+### Stage 1：完成正常 runtime pressure sweep
 
-The immediate goal is not to perfect the software implementation indefinitely.
+继续完成 v10：
 
-The immediate goal is to extract the right architecture-facing evidence.
-
-The prototype should provide:
-
-1. fixed-length runtime results
-2. pressure sweeps across device memory ratio
-3. latency breakdowns for:
-   - key construction
-   - lookup
-   - aggregation
-   - prefetch enqueue
-   - transfer wait / deadline miss
-4. metadata footprint breakdowns:
-   - per-entry storage
-   - total library footprint
-   - working-set size at query time
-
-Without this breakdown, the paper remains a systems story.
-
-With this breakdown, it becomes an architecture story.
-
----
-
-## Immediate Experimental Plan
-
-### Stage 1: finish runtime pressure evidence
-
-Complete and summarize the fixed-length pressure sweep:
-
-- traces:
-  - `mixed`
-  - `recurrence_heavy`
-  - `stationary`
+- traces: `mixed`, `recurrence_heavy`, `stationary`
 - variants:
   - `on_demand`
   - `history_reuse_backbone`
   - `history_reuse_consensus_backbone`
   - `history_reuse_local_backbone`
-- pressure:
-  - multiple `device_memory_ratio` settings
+- ratios:
+  - `0.60`
+  - `0.45`
+  - `0.35`
 
-The objective is to confirm:
+解释方式：
 
-- local continuation reduces runtime stall under pressure
-- gains are not an artifact of variable-length generation
+- `0.60` 如果全是 hit rate 1.0，就是 control。
+- 真正看 pressure 的是 `0.45/0.35`。
+- aggressive `0.30` 不混入正常性能图，应单独当 robustness boundary。
 
-### Stage 2: add bottleneck timing instrumentation
+### Stage 2：补 progress counters
 
-Instrument:
-
-- local key construction time
-- local lookup time
-- continuation aggregation time
-- enqueue time
-- transfer wait time
-- all-locked event count
-- no-victim wait time
-- prefetch drop/defer count
-- demand-vs-prefetch conflict count
-
-This is the most important step for HPCA framing.
-
-### Stage 2.5: fix and expose runtime progress
-
-The v10b failure should be converted into a measurable progress boundary.
-
-Software fixes:
-
-- replace one-shot no-victim wait with `while no victim -> wait/recheck`
-- make prefetch best-effort under pressure:
-  - drop if no victim is available
-  - defer if demand traffic is active
-  - throttle when the evictable set is small
-- protect victim selection against TOCTOU:
-  - hold the victim lock through eviction
-  - or revalidate immediately before eviction
-- add bounded diagnostics instead of fatal:
-  - long no-victim wait warning
-  - all-locked counter
-  - prefetch drop/defer counter
-
-After this fix, the same strong-pressure setup should produce:
-
-- no process fatal
-- increased no-victim wait time
-- measurable prefetch drop/defer rate
-- demand fetch progress preserved
-
-This stage is required before using strong-pressure results in any paper figure.
-
-### Stage 3: build a trace-driven co-design model
-
-Before RTL, build a compact performance model that estimates the impact of:
-
-- lower metadata lookup latency
-- on-chip continuation metadata residency
-- deadline-aware transfer scheduling
-- demand/prefetch priority separation
-- reserved demand cache slots
-- fast evictable-set metadata
-
-This lets us compare:
-
-- software local continuation
-- software + CPE model
-
-without overcommitting to a hardware implementation too early.
-
----
-
-## Concrete Implementation Backlog
-
-### P0: keep the evidence clean
-
-- Finish `v10` as the normal fixed-length pressure sweep.
-- Do not rerun `v10b` aggressive `ratio_030` as a normal performance point.
-- If GPU0 is used before the progress fix, use a safer supplement:
-  - `ratio_040/035`
-  - or `ratio_030` with `prefetch_future_layers=2` and `prefetch_max_candidates=16`
-
-### P1: add progress counters
-
-Add runtime counters for:
+必须记录：
 
 - `no_victim_wait_count`
 - `no_victim_wait_total_us`
@@ -456,12 +396,109 @@ Add runtime counters for:
 - `prefetch_drop_count`
 - `prefetch_defer_count`
 - `demand_prefetch_conflict_count`
+- eviction count
+- cache hit/miss fetch count
 
-Expose them through benchmark raw JSON and decision summaries.
+当前已经加了一部分 dispatcher counters，但 v10 运行时没有使用 inplace rebuild，所以 v10 不能拿这些 counter 当证据。后续要重新 build/install 后跑 canary。
 
-### P2: add timing breakdown
+### Stage 3：修 progress bug
 
-Add per-policy timing fields for:
+软件修复顺序：
+
+1. no-victim wait 从 one-shot wait 改为 loop wait/recheck。
+2. demand fetch 不再因为 temporarily no victim fatal。
+3. prefetch 在 no-victim/high-pressure 下 drop/defer。
+4. victim selection 做 lock ownership 或 revalidation。
+5. 所有 drop/defer/wait/conflict 都进 raw JSON 和 summary。
+
+验收标准：
+
+- v10b 同类强压力配置不再 fatal。
+- aggressive prefetch 不一定变快，但 demand progress 保住。
+- prefetch drop/defer 随 pressure 上升而上升。
+- no-victim wait 从 fatal log 变成可量化指标。
+
+### Stage 4：跑 post-fix 三类实验
+
+正常性能：
+
+- `0.60/0.45/0.35`
+
+保守强压力：
+
+- `0.30`
+- `future_layers=2`
+- `max_candidates=16`
+
+robustness boundary：
+
+- `0.30`
+- `future_layers=4`
+- `max_candidates=32`
+
+预期不是 aggressive `0.30` 一定最快。
+
+预期是：
+
+- 不 fatal。
+- demand progress preserved。
+- prefetch drop/defer 明显增加。
+- no-victim wait 变成可分析曲线。
+
+### Stage 5：trace-driven CPE model
+
+在 RTL 之前，先做 trace-driven model。
+
+比较：
+
+- 纯软件 local continuation
+- 软件 + demand/prefetch queue priority
+- 软件 + reserved demand slots
+- 软件 + fast evictable metadata
+- 软件 + deadline-aware admission
+
+模型输入来自真实 counter：
+
+- candidate deadline
+- transfer queue occupancy
+- no-victim wait
+- evictable count
+- drop/defer rate
+- demand/prefetch conflict
+
+这样可以先证明 architecture substrate 的价值，而不是过早承诺硬件实现。
+
+---
+
+## 代码 backlog
+
+### P0：保持证据干净
+
+- v10 继续跑完。
+- `ratio_060` 标为 control。
+- `ratio_030 + future_layers=4 + max_candidates=32` 标为 robustness boundary。
+- 不把 crash 配置混入正常 performance 图。
+
+### P1：补全 counter
+
+已有：
+
+- cache hit/miss fetch count
+- eviction count
+- all-locked count
+- no-victim wait count/time
+
+还需要：
+
+- prefetch drop count
+- prefetch defer count
+- demand/prefetch conflict count
+- evictable-node count snapshot
+- locked-node count snapshot
+
+### P2：补 timing breakdown
+
+policy 层：
 
 - key construction
 - lookup
@@ -469,161 +506,61 @@ Add per-policy timing fields for:
 - scoring/ranking
 - enqueue
 
-For C++ runtime, add event-level timing for:
+runtime 层：
 
 - fetch queue wait
 - H2D transfer wait
 - execution wait
 - no-victim wait
+- deadline miss
 
-### P3: implement progress semantics
+### P3：实现 progress semantics
 
-Demand fetch:
+demand：
 
 - loop on no-victim wait
-- recheck after every wakeup
-- never fatal on a temporarily empty evictable set
+- recheck after wakeup
+- no fatal on temporarily empty evictable set
 
-Prefetch:
+prefetch：
 
-- treat prefetch as best-effort
-- drop or defer under no-victim pressure
-- expose drop/defer counts as first-class metrics
+- best-effort
+- drop/defer/throttle under pressure
+- 不占 demand reserve
 
-Victim selection:
+victim：
 
-- hold victim ownership through eviction, or revalidate before eviction
-- avoid selecting a node that becomes locked before actual eviction
+- ownership 或 revalidation
+- 避免 TOCTOU
 
-### P4: run post-fix experiments
+### P4：实验与报告
 
-Run three classes of experiments:
-
-- normal performance: `0.60/0.45/0.35`
-- conservative strong pressure: `0.30 + future_layers=2 + max_candidates=16`
-- robustness boundary: `0.30 + future_layers=4 + max_candidates=32`
-
-The expected post-fix behavior is not that aggressive `0.30` becomes fast. The expected behavior is:
-
-- no fatal crash
-- demand progress preserved
-- prefetch drop/defer rises under pressure
-- no-victim wait becomes measurable instead of hidden
-
-### P5: build the co-design model
-
-Use the measured counters to simulate:
-
-- faster metadata lookup
-- priority-separated demand/prefetch queues
-- reserved demand slots
-- hardware-visible evictable-set metadata
-
-The model output should report:
-
-- projected ms/token
-- no-victim wait reduction
-- deadline miss reduction
-- wasted prefetch reduction
-
-This is the bridge from software prototype to HPCA contribution.
+- 重新 inplace build 后跑 counter canary。
+- 跑 post-fix robustness boundary。
+- 更新 `pressure_sweep_summary.md`。
+- 把 progress counter 加进 decision summary。
+- 形成 failure characterization 图：
+  - all-locked count vs ratio
+  - no-victim wait vs ratio
+  - prefetch drop/defer vs ratio
+  - demand latency tail vs ratio
 
 ---
 
-## Evaluation Structure
+## 最终判断
 
-### Main software baselines
+当前版本如果写成：
 
-- `on_demand`
-- `sequence_object_backbone`
-- `sequence_object_consensus`
-- `local_continuation`
+> continuation cache improves expert prefetch
 
-### Main architecture comparison
+不够 HPCA，也不够 non-incremental。
 
-Compare:
+更稳的 HPCA 版本是：
 
-1. sequence object + software scheduling
-2. local continuation + software scheduling
-3. local continuation + continuation paging engine model
+> MoE expert paging needs progress-guaranteed memory hierarchy semantics.  
+> Continuation cache shows how to generate better local hints, but strong memory pressure exposes a deeper substrate problem: speculative prefetch must not break demand progress.  
+> We co-design demand/prefetch priority, reserved demand capacity, evictable metadata, and deadline-aware admission to make expert paging robust and efficient.
 
-This is critical.
+中文一句话：
 
-It proves:
-
-- object correction matters more than controller refinement
-- co-design matters after the object is corrected
-
-### Primary metrics
-
-- p50 / p95 / p99 latency
-- ms/token
-- deadline miss rate
-- wasted prefetch bytes
-- expert miss stall time
-- metadata lookup time
-- transfer queue occupancy
-- no-victim wait count/time
-- all-locked cache events
-- prefetch drop/defer rate
-
-### Supporting metrics
-
-- same-step recall
-- omission gap
-- restricted gap
-- cache hit rate
-
-Supporting metrics justify the object story.
-
-Primary metrics justify the architecture story.
-
----
-
-## What Not To Do Next
-
-Do not prioritize:
-
-- confidence-aware paging as the main paper contribution
-- router calibration as the current mainline
-- geometry-aware retrieval before the current line is closed
-- new predictor heuristics
-
-These can all exist later, but they weaken the current HPCA story if introduced too early.
-
----
-
-## Strongest Current Narrative
-
-The strongest HPCA-style story available now is:
-
-1. Existing decode-time MoE paging uses the wrong retrieval granularity.
-2. This creates a candidate omission bottleneck before scheduling begins.
-3. A continuation cache corrects the retrieval object and exposes a new metadata-path bottleneck.
-4. A continuation-aware paging substrate is needed to make the corrected object hardware-efficient.
-
-That is much sharper than:
-
-- “our predictor is better”
-- “our utility estimator is better”
-- “our scheduler is smarter”
-
----
-
-## Recommendation
-
-If the target is HPCA, continue on the current path, but change the center of gravity:
-
-- from software retrieval method
-- to metadata-path and transfer-scheduling co-design
-
-In practical terms:
-
-1. finish `v10`
-2. add fine-grained timing/metadata instrumentation
-3. write down the minimal CPE abstraction
-4. evaluate software vs software+co-design model
-
-One sentence:
-
-> Treat `continuation cache` as the architecture entry point, not the final paper endpoint.
+> 这篇不要讲“我预测 expert 更准”，要讲“MoE expert paging 需要一种新的内存层级语义：prefetch 可以投机，但 demand 必须有进展保证”。
