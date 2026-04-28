@@ -135,7 +135,7 @@ v10 fixed-length pressure sweep 正在跑。当前已完成的 `ratio_060` 部�
 
 - `/data/ziheng/moe_infinity_fgo_runs/phasea_v10_runtime_fixedlen_qwen_pressure_sweep/analysis/pressure_sweep_summary.md`
 
-### 3. v10b 暴露了第二层问题：runtime progress
+### 3. v10b/v13 暴露了第二层问题：runtime progress
 
 v10b strong-pressure run 的关键现象：
 
@@ -151,6 +151,21 @@ v10b strong-pressure run 的关键现象：
 
 > demand fetch 需要 cache slot，但当前 evictable candidate set 暂时为空。  
 > 当前 runtime 只等一次，然后把“暂时没有 victim”当成不可恢复错误。
+
+v13 用同类长运行配置重跑，并带上了新的 dispatcher counters：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v13_boundary_repro_counters`
+- 配置：`ratio=0.30`, `future_layers=4`, `max_candidates=32`, `warmup=2`, `measured=32`
+- `on_demand` 完成：`8.932 tok/s`, miss `5868`, eviction `2418`
+- `history_reuse_consensus_backbone` 完成但极慢：`1.145 tok/s`, miss `9381`, eviction `3910`
+- `history_reuse_local_backbone` 没有复现 fatal，但进入 progress stall，被人工 `SIGTERM` 结束
+- stall 位置：events 停在 `mixed-026 step=11 layer=0`
+- gdb 堆栈：主线程在 `ExpertDispatcher::WaitHiddenStates()`，`GPUFetchFunc0`/`GPUExecFunc0` 都在 condition wait
+
+v13 使结论更克制，也更强：
+
+> 强 pressure 下的问题不只是 fatal。  
+> speculative expert traffic 会显著增加 miss/evict，并可能把 decode 推入 non-progress 状态；表现可以是 v10b 的 fatal，也可以是 v13 的长期 stall。
 
 这正是 HPCA 切入口：
 
@@ -552,7 +567,12 @@ runtime 需要看到这些状态：
 - expired prefetch count
 - cancelable prefetch count
 
-当前已经加了一部分 dispatcher counters，但 v10 运行时没有使用 inplace rebuild，所以 v10 不能拿这些 counter 当证据。后续要重新 build/install 后跑 canary。
+当前已经加了一部分 dispatcher counters。v10 运行时没有使用 inplace rebuild，所以 v10 不能拿这些 counter 当证据；v12/v13 已经在 inplace rebuild 后重跑，可以作为 counter 证据。
+
+当前 counter 证据：
+
+- v12 短 canary：所有 case 完成，没有 no-victim/all-locked，但 miss/evict 非零，说明它是中等 pressure sanity point。
+- v13 长 boundary：on-demand 完成，consensus 完成但 miss/evict 和 latency 明显上升，local 进入 progress stall。
 
 ### Stage 3：修 progress bug
 
