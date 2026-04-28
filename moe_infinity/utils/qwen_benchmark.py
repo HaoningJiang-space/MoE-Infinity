@@ -59,6 +59,8 @@ def build_qwen_benchmark_config(
     prefetch_admission_max_per_plan: int = -1,
     prefetch_credit_gated_enabled: bool = False,
     prefetch_credit_count: int = -1,
+    prefetch_credit_zero_action: str = "update_only",
+    prefetch_policy_disabled: bool = False,
     historical_reuse_match_topk: int = 4,
     historical_reuse_match_min_required: int = 2,
     historical_reuse_consensus_min_votes: int = 2,
@@ -200,6 +202,8 @@ def build_qwen_benchmark_config(
         ),
         "prefetch_credit_gated_enabled": bool(prefetch_credit_gated_enabled),
         "prefetch_credit_count": int(prefetch_credit_count),
+        "prefetch_credit_zero_action": str(prefetch_credit_zero_action),
+        "prefetch_policy_disabled": bool(prefetch_policy_disabled),
         "local_continuation_library_capacity": int(
             local_continuation_library_capacity
         ),
@@ -531,6 +535,14 @@ def aggregate_request_records(
         )
         for record in request_records
     ]
+    prefetch_credit_skip_policy_update_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_credit_skip_policy_update_count", 0
+            )
+        )
+        for record in request_records
+    ]
     prefetch_plan_replace_counts = [
         int(record.get("prefetcher_stats", {}).get("prefetch_plan_replace_count", 0))
         for record in request_records
@@ -659,6 +671,9 @@ def aggregate_request_records(
         ),
         "prefetch_credit_materialized_count_total": int(
             sum(prefetch_credit_materialized_counts)
+        ),
+        "prefetch_credit_skip_policy_update_count_total": int(
+            sum(prefetch_credit_skip_policy_update_counts)
         ),
         "prefetch_plan_replace_count_total": int(sum(prefetch_plan_replace_counts)),
         "prefetch_plan_empty_replace_count_total": int(

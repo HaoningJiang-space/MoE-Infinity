@@ -27,6 +27,8 @@ class ExpertPrefetcher(object):
         self.prefetch_admission_max_per_plan = -1
         self.prefetch_credit_gated_enabled = False
         self.prefetch_credit_count = -1
+        self.prefetch_credit_zero_action = "update_only"
+        self.prefetch_policy_disabled = False
         self.reset_prefetch_runtime_stats()
 
     def set_archer_engine(self, archer_engine):
@@ -52,6 +54,7 @@ class ExpertPrefetcher(object):
             "prefetch_credit_issued_total": 0,
             "prefetch_credit_limited_count": 0,
             "prefetch_credit_materialized_count": 0,
+            "prefetch_credit_skip_policy_update_count": 0,
             "prefetch_plan_replace_count": 0,
             "prefetch_plan_empty_replace_count": 0,
             "prefetch_plan_candidate_count": 0,
@@ -183,6 +186,10 @@ class ExpertPrefetcher(object):
     def record_credit_skip(self):
         stats = self._prefetch_runtime_stats
         stats["prefetch_credit_skip_count"] += 1
+
+    def record_credit_skip_policy_update(self):
+        stats = self._prefetch_runtime_stats
+        stats["prefetch_credit_skip_policy_update_count"] += 1
 
     def _replace_prefetch_plan(self, tensor_ids):
         stats = self._prefetch_runtime_stats

@@ -44,6 +44,9 @@ PREFETCH_CREDIT_GATED_ENABLED = os.environ.get(
 PREFETCH_CREDIT_COUNT = os.environ.get(
     "PRESSURE_CANARY_PREFETCH_CREDIT_COUNT", "-1"
 )
+PREFETCH_CREDIT_ZERO_ACTION = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_CREDIT_ZERO_ACTION", "update_only"
+)
 DEFAULT_CASES = [
     ("conservative", 2, 16, "on_demand"),
     ("conservative", 2, 16, "history_reuse_consensus_backbone"),
@@ -134,6 +137,8 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         PREFETCH_ADMISSION_MAX_PER_PLAN,
         "--prefetch-credit-count",
         PREFETCH_CREDIT_COUNT,
+        "--prefetch-credit-zero-action",
+        PREFETCH_CREDIT_ZERO_ACTION,
         "--historical-reuse-match-topk",
         "4",
         "--historical-reuse-match-min-required",

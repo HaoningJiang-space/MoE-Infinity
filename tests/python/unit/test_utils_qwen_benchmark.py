@@ -58,6 +58,8 @@ def test_build_qwen_benchmark_config_variants():
     assert history_backbone["prefetch_admission_max_per_plan"] == -1
     assert history_backbone["prefetch_credit_gated_enabled"] is False
     assert history_backbone["prefetch_credit_count"] == -1
+    assert history_backbone["prefetch_credit_zero_action"] == "update_only"
+    assert history_backbone["prefetch_policy_disabled"] is False
 
     credit_gated = build_qwen_benchmark_config(
         variant="history_reuse_local_backbone",
@@ -69,10 +71,14 @@ def test_build_qwen_benchmark_config_variants():
         library_admission="diversity_aware",
         prefetch_credit_gated_enabled=True,
         prefetch_credit_count=8,
+        prefetch_credit_zero_action="skip_policy_update",
+        prefetch_policy_disabled=True,
     )
     assert credit_gated["historical_reuse_object_mode"] == "local_continuation"
     assert credit_gated["prefetch_credit_gated_enabled"] is True
     assert credit_gated["prefetch_credit_count"] == 8
+    assert credit_gated["prefetch_credit_zero_action"] == "skip_policy_update"
+    assert credit_gated["prefetch_policy_disabled"] is True
 
 
 def test_load_chat_trace_validates_schema(tmp_path):
@@ -165,6 +171,7 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_credit_issued_total": 8,
                 "prefetch_credit_limited_count": 1,
                 "prefetch_credit_materialized_count": 8,
+                "prefetch_credit_skip_policy_update_count": 0,
                 "prefetch_plan_replace_count": 2,
                 "prefetch_plan_empty_replace_count": 1,
                 "prefetch_plan_candidate_count": 8,
@@ -213,6 +220,7 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_credit_issued_total": 8,
                 "prefetch_credit_limited_count": 1,
                 "prefetch_credit_materialized_count": 7,
+                "prefetch_credit_skip_policy_update_count": 5,
                 "prefetch_plan_replace_count": 3,
                 "prefetch_plan_empty_replace_count": 0,
                 "prefetch_plan_candidate_count": 15,
@@ -247,6 +255,7 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["prefetch_credit_issued_total"] == 16
     assert aggregate["prefetch_credit_limited_count_total"] == 2
     assert aggregate["prefetch_credit_materialized_count_total"] == 15
+    assert aggregate["prefetch_credit_skip_policy_update_count_total"] == 5
     assert aggregate["prefetch_plan_replace_count_total"] == 5
     assert aggregate["prefetch_plan_empty_replace_count_total"] == 1
     assert aggregate["prefetch_plan_candidate_count_total"] == 23

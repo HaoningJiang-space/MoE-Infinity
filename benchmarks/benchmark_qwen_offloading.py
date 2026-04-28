@@ -93,6 +93,17 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Speculative prefetch candidates allowed per policy step when credit gating is enabled; 0 skips generation.",
     )
+    parser.add_argument(
+        "--prefetch-credit-zero-action",
+        choices=("update_only", "skip_policy_update"),
+        default="update_only",
+        help="Action when credit-gated prefetch has zero credit.",
+    )
+    parser.add_argument(
+        "--prefetch-policy-disabled",
+        action="store_true",
+        help="Keep prefetch wiring enabled but skip the Python expert-policy drive.",
+    )
     parser.add_argument("--historical-reuse-match-topk", type=int, default=4)
     parser.add_argument(
         "--historical-reuse-match-min-required", type=int, default=2
@@ -211,6 +222,8 @@ def _run_case(
     prefetch_admission_max_per_plan: int,
     prefetch_credit_gated_enabled: bool,
     prefetch_credit_count: int,
+    prefetch_credit_zero_action: str,
+    prefetch_policy_disabled: bool,
     historical_reuse_match_topk: int,
     historical_reuse_match_min_required: int,
     historical_reuse_consensus_min_votes: int,
@@ -271,6 +284,8 @@ def _run_case(
         prefetch_admission_max_per_plan=prefetch_admission_max_per_plan,
         prefetch_credit_gated_enabled=prefetch_credit_gated_enabled,
         prefetch_credit_count=prefetch_credit_count,
+        prefetch_credit_zero_action=prefetch_credit_zero_action,
+        prefetch_policy_disabled=prefetch_policy_disabled,
         historical_reuse_match_topk=historical_reuse_match_topk,
         historical_reuse_match_min_required=historical_reuse_match_min_required,
         historical_reuse_consensus_min_votes=historical_reuse_consensus_min_votes,
@@ -562,6 +577,8 @@ def main() -> None:
                 prefetch_admission_max_per_plan=args.prefetch_admission_max_per_plan,
                 prefetch_credit_gated_enabled=args.prefetch_credit_gated_enabled,
                 prefetch_credit_count=args.prefetch_credit_count,
+                prefetch_credit_zero_action=args.prefetch_credit_zero_action,
+                prefetch_policy_disabled=args.prefetch_policy_disabled,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,
                 historical_reuse_match_min_required=args.historical_reuse_match_min_required,
                 historical_reuse_consensus_min_votes=args.historical_reuse_consensus_min_votes,

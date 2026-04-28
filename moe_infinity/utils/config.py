@@ -186,6 +186,14 @@ class ArcherConfig:
         default=-1,
         metadata={"help": "Speculative prefetch candidates allowed per policy step when credit gating is enabled; 0 skips generation"},
     )
+    prefetch_credit_zero_action: str = field(
+        default="update_only",
+        metadata={"help": "Action when credit-gated prefetch has zero credit: update_only or skip_policy_update"},
+    )
+    prefetch_policy_disabled: bool = field(
+        default=False,
+        metadata={"help": "Disable Python expert-policy drive while keeping prefetch wiring enabled"},
+    )
     phasea_analysis_future_layers: int = field(
         default=0,
         metadata={"help": "Analysis-only candidate future-layer window for Phase-A observation; 0 means unbounded"},
