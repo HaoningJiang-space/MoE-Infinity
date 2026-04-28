@@ -194,6 +194,11 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         or int(case.get("log_characterization", {}).get("all_locked_count", 0) or 0) > 0
         for case in summary["cases"]
     )
+    any_pending_stall = any(
+        int(case.get("aggregate", {}).get("dispatcher_pending_stall_count_total", 0) or 0)
+        > 0
+        for case in summary["cases"]
+    )
     has_dispatcher_pressure = any(
         int(case.get("aggregate", {}).get("dispatcher_eviction_count_total", 0) or 0) > 0
         or int(case.get("aggregate", {}).get("dispatcher_cache_miss_fetch_count_total", 0) or 0)
@@ -209,14 +214,14 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         "",
         "## Cases",
         "",
-        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | miss | evict | no-victim | all-locked | fatal |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | miss | evict | no-victim | pending-stall | all-locked | fatal |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
         log_info = case.get("log_characterization", {})
         lines.append(
-            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {miss} | {evict} | {no_victim} | {all_locked} | {fatal} |".format(
+            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {miss} | {evict} | {no_victim} | {pending_stall} | {all_locked} | {fatal} |".format(
                 mode=case["mode"],
                 variant=case["variant"],
                 status=case["status"],
@@ -237,6 +242,9 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
                 miss=aggregate.get("dispatcher_cache_miss_fetch_count_total", "n/a"),
                 evict=aggregate.get("dispatcher_eviction_count_total", "n/a"),
                 no_victim=aggregate.get("dispatcher_no_victim_wait_count_total", "n/a"),
+                pending_stall=aggregate.get(
+                    "dispatcher_pending_stall_count_total", "n/a"
+                ),
                 all_locked=aggregate.get(
                     "dispatcher_all_locked_event_count_total",
                     log_info.get("all_locked_count", 0),
@@ -249,9 +257,15 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "- On-demand failed, so this pressure point is too strong to isolate prefetch-induced progress issues.",
             "- Lower pressure or add demand progress fixes before using this point as evidence.",
         ]
-    elif any_aggressive_failed or any_nonzero_exit or any_no_victim or any_all_locked:
+    elif (
+        any_aggressive_failed
+        or any_nonzero_exit
+        or any_no_victim
+        or any_all_locked
+        or any_pending_stall
+    ):
         interpretation = [
-            "- Aggressive prefetch produced a non-complete run or no-victim/all-locked events, supporting the hypothesis that speculative expert traffic can violate progress under strong pressure.",
+            "- Aggressive prefetch produced a non-complete run or progress events, supporting the hypothesis that speculative expert traffic can violate progress under strong pressure.",
             "- If the exit was external termination, inspect the log and any captured stack artifact before treating it as a runtime fatal.",
             "- Treat this run as a robustness boundary, not a normal performance point.",
         ]

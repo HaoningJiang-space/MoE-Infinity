@@ -80,7 +80,7 @@ def dispatcher_stats_dict(stats: Sequence[int] | None) -> Dict[str, int]:
     if not stats:
         return {}
     values = list(stats)
-    if len(values) not in {4, 11}:
+    if len(values) not in {4, 11, 18}:
         raise ValueError(f"Unexpected dispatcher stats payload: {values}")
     result = {
         "enqueue_count": int(values[0]),
@@ -98,6 +98,18 @@ def dispatcher_stats_dict(stats: Sequence[int] | None) -> Dict[str, int]:
                 "no_victim_wait_count": int(values[8]),
                 "no_victim_wait_total_us": int(values[9]),
                 "no_victim_wait_max_us": int(values[10]),
+            }
+        )
+    if len(values) >= 18:
+        result.update(
+            {
+                "fetch_dequeue_count": int(values[11]),
+                "exec_dequeue_count": int(values[12]),
+                "output_count": int(values[13]),
+                "pending_wait_count": int(values[14]),
+                "pending_wait_total_us": int(values[15]),
+                "pending_wait_max_us": int(values[16]),
+                "pending_stall_count": int(values[17]),
             }
         )
     return result

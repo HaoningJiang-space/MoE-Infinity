@@ -87,6 +87,7 @@ class ExpertDispatcher : public base::noncopyable {
                   int gpu_id);
 
   ExpertNodePtr FindExpertEvict(int gpu_id);
+  void WaitForPendingZero(const char* caller);
 
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
@@ -114,6 +115,13 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> no_victim_wait_count_{0};
   std::atomic<std::uint64_t> no_victim_wait_total_us_{0};
   std::atomic<std::uint64_t> no_victim_wait_max_us_{0};
+  std::atomic<std::uint64_t> fetch_dequeue_count_{0};
+  std::atomic<std::uint64_t> exec_dequeue_count_{0};
+  std::atomic<std::uint64_t> output_count_{0};
+  std::atomic<std::uint64_t> pending_wait_count_{0};
+  std::atomic<std::uint64_t> pending_wait_total_us_{0};
+  std::atomic<std::uint64_t> pending_wait_max_us_{0};
+  std::atomic<std::uint64_t> pending_stall_count_{0};
 
   std::atomic<size_t> pending_;
 

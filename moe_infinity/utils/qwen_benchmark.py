@@ -423,6 +423,34 @@ def aggregate_request_records(
         int(record.get("dispatcher_stats", {}).get("no_victim_wait_max_us", 0))
         for record in request_records
     ]
+    fetch_dequeue_counts = [
+        int(record.get("dispatcher_stats", {}).get("fetch_dequeue_count", 0))
+        for record in request_records
+    ]
+    exec_dequeue_counts = [
+        int(record.get("dispatcher_stats", {}).get("exec_dequeue_count", 0))
+        for record in request_records
+    ]
+    output_counts = [
+        int(record.get("dispatcher_stats", {}).get("output_count", 0))
+        for record in request_records
+    ]
+    pending_wait_counts = [
+        int(record.get("dispatcher_stats", {}).get("pending_wait_count", 0))
+        for record in request_records
+    ]
+    pending_wait_total_us = [
+        int(record.get("dispatcher_stats", {}).get("pending_wait_total_us", 0))
+        for record in request_records
+    ]
+    pending_wait_max_us = [
+        int(record.get("dispatcher_stats", {}).get("pending_wait_max_us", 0))
+        for record in request_records
+    ]
+    pending_stall_counts = [
+        int(record.get("dispatcher_stats", {}).get("pending_stall_count", 0))
+        for record in request_records
+    ]
     library_query_deltas = [
         int(record.get("library_stats_delta", {}).get("query_count", 0))
         for record in request_records
@@ -481,6 +509,12 @@ def aggregate_request_records(
         "dispatcher_all_locked_event_count_total": int(sum(all_locked_event_counts)),
         "dispatcher_no_victim_wait_count_total": int(sum(no_victim_wait_counts)),
         "dispatcher_no_victim_wait_total_us": int(sum(no_victim_wait_total_us)),
+        "dispatcher_fetch_dequeue_count_total": int(sum(fetch_dequeue_counts)),
+        "dispatcher_exec_dequeue_count_total": int(sum(exec_dequeue_counts)),
+        "dispatcher_output_count_total": int(sum(output_counts)),
+        "dispatcher_pending_wait_count_total": int(sum(pending_wait_counts)),
+        "dispatcher_pending_wait_total_us": int(sum(pending_wait_total_us)),
+        "dispatcher_pending_stall_count_total": int(sum(pending_stall_counts)),
         "mean_dispatcher_cache_hit_fetch_count": (
             float(sum(cache_hit_fetch_counts) / request_count)
             if request_count
@@ -511,6 +545,31 @@ def aggregate_request_records(
         ),
         "p95_dispatcher_no_victim_wait_max_us": percentile(
             no_victim_wait_max_us, 95
+        ),
+        "mean_dispatcher_fetch_dequeue_count": (
+            float(sum(fetch_dequeue_counts) / request_count) if request_count else 0.0
+        ),
+        "mean_dispatcher_exec_dequeue_count": (
+            float(sum(exec_dequeue_counts) / request_count) if request_count else 0.0
+        ),
+        "mean_dispatcher_output_count": (
+            float(sum(output_counts) / request_count) if request_count else 0.0
+        ),
+        "mean_dispatcher_pending_wait_count": (
+            float(sum(pending_wait_counts) / request_count) if request_count else 0.0
+        ),
+        "mean_dispatcher_pending_wait_total_us": (
+            float(sum(pending_wait_total_us) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "p95_dispatcher_pending_wait_max_us": percentile(
+            pending_wait_max_us, 95
+        ),
+        "mean_dispatcher_pending_stall_count": (
+            float(sum(pending_stall_counts) / request_count)
+            if request_count
+            else 0.0
         ),
         "library_query_count_total": int(sum(library_query_deltas)),
         "library_hit_count_total": int(sum(library_hit_deltas)),
@@ -599,15 +658,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -620,6 +679,12 @@ def render_markdown_summary(
                     ),
                     no_victim_us=agg.get(
                         "mean_dispatcher_no_victim_wait_total_us", 0.0
+                    ),
+                    pending_wait_us=agg.get(
+                        "mean_dispatcher_pending_wait_total_us", 0.0
+                    ),
+                    pending_stalls=agg.get(
+                        "mean_dispatcher_pending_stall_count", 0.0
                     ),
                     hit=agg["mean_cache_hit_rate"],
                 )

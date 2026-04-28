@@ -21,6 +21,17 @@
 #include <future>
 #include <algorithm>
 #include <chrono>
+#include <sstream>
+#include <stdexcept>
+
+namespace {
+void RecordAtomicMax(std::atomic<std::uint64_t>& target,
+                     std::uint64_t value) {
+  auto current = target.load();
+  while (value > current && !target.compare_exchange_weak(current, value)) {
+  }
+}
+}  // namespace
 
 ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
                                    int expert_type, int num_threads)
@@ -179,11 +190,8 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
                        .count();
     busy_wait_count_.fetch_add(1);
     busy_wait_total_wait_us_.fetch_add(wait_us);
-    auto current_max = busy_wait_max_wait_us_.load();
-    while (wait_us > current_max &&
-           !busy_wait_max_wait_us_.compare_exchange_weak(current_max,
-                                                         wait_us)) {
-    }
+    RecordAtomicMax(busy_wait_max_wait_us_,
+                    static_cast<std::uint64_t>(wait_us));
   }
   expert_node->node->last_access_time = MCIROSECONDS_SINCE_EPOCH;
 
@@ -244,6 +252,13 @@ std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
       no_victim_wait_count_.load(),
       no_victim_wait_total_us_.load(),
       no_victim_wait_max_us_.load(),
+      fetch_dequeue_count_.load(),
+      exec_dequeue_count_.load(),
+      output_count_.load(),
+      pending_wait_count_.load(),
+      pending_wait_total_us_.load(),
+      pending_wait_max_us_.load(),
+      pending_stall_count_.load(),
   };
 }
 
@@ -259,6 +274,13 @@ void ExpertDispatcher::ResetRuntimeStats() {
   no_victim_wait_count_.store(0);
   no_victim_wait_total_us_.store(0);
   no_victim_wait_max_us_.store(0);
+  fetch_dequeue_count_.store(0);
+  exec_dequeue_count_.store(0);
+  output_count_.store(0);
+  pending_wait_count_.store(0);
+  pending_wait_total_us_.store(0);
+  pending_wait_max_us_.store(0);
+  pending_stall_count_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -312,9 +334,11 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
     if (node == nullptr) continue;
     if (node->device.is_cuda() && node->incache_visit_count < min_visit_count &&
         node->mutex.try_lock()) {
+      if (evict_expert_node != nullptr) {
+        evict_expert_node->node->mutex.unlock();
+      }
       evict_expert_node = experts_[expert_idx][layer_idx];
       min_visit_count = node->incache_visit_count;
-      node->mutex.unlock();
     }
   }
   return evict_expert_node;
@@ -349,6 +373,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     // lock.unlock();
     CallArgs args;
     input_queue_[gpu_id].Pop(args);
+    fetch_dequeue_count_.fetch_add(1);
     if (main_thread_stop_flag_.load() && args.layer_idx < 0) {
       break;
     }
@@ -393,7 +418,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       } else {
         // find the expert in gpu and min incache_visit_count
         ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
-        if (evict_expert_node == nullptr) {
+        while (evict_expert_node == nullptr && !main_thread_stop_flag_.load()) {
           all_locked_event_count_.fetch_add(1);
           no_victim_wait_count_.fetch_add(1);
           auto no_victim_wait_start = std::chrono::steady_clock::now();
@@ -406,7 +431,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
               " expert_idx ", expert_idx);
           {
             std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
-            cache_cv_[gpu_id].wait(lock);
+            cache_cv_[gpu_id].wait_for(lock, std::chrono::milliseconds(100));
           }
           auto no_victim_wait_us =
               std::chrono::duration_cast<std::chrono::microseconds>(
@@ -415,11 +440,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
           auto no_victim_wait_us_u64 =
               static_cast<std::uint64_t>(no_victim_wait_us);
           no_victim_wait_total_us_.fetch_add(no_victim_wait_us_u64);
-          auto current_max = no_victim_wait_max_us_.load();
-          while (no_victim_wait_us_u64 > current_max &&
-                 !no_victim_wait_max_us_.compare_exchange_weak(
-                     current_max, no_victim_wait_us_u64)) {
-          }
+          RecordAtomicMax(no_victim_wait_max_us_, no_victim_wait_us_u64);
           evict_expert_node = FindExpertEvict(gpu_id);
         }
         // auto num_layers = experts_[0].size();
@@ -446,11 +467,14 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         // }
         //   }
         // }
-        DLOG_FATAL_IF(
-            evict_expert_node == nullptr,
-            "ExpertDispatcher::GPUFetchFunc: evict_node is nullptr, gpu_id",
-            gpu_id, "cache size", cache_sizes_[gpu_id], "in cache count",
-            cached_experts_[gpu_id].size());
+        if (evict_expert_node == nullptr) {
+          DLOG_WARN(
+              "ExpertDispatcher::GPUFetchFunc: no victim available during "
+              "shutdown, gpu_id ",
+              gpu_id, " cache size ", cache_sizes_[gpu_id],
+              " in cache count ", cached_experts_[gpu_id].size());
+          continue;
+        }
 
         DLOG_DEBUG("evicting expert: gpu_id ", gpu_id, " cache size ",
                    cache_sizes_[gpu_id], " incache count ",
@@ -459,6 +483,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         eviction_count_.fetch_add(1);
 
         auto evict_node = evict_expert_node->node;
+        std::unique_lock<std::mutex> evict_lock(evict_node->mutex,
+                                                std::adopt_lock);
         evict_node->SetDevice(evict_node->default_host);
         cache_sizes_[gpu_id] += evict_node->byte_size;
         int64_t evict_layer_idx = evict_expert_node->layer_idx;
@@ -552,6 +578,7 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
 
     ExecArgs args;
     exec_queue_[gpu_id].Pop(args);
+    exec_dequeue_count_.fetch_add(1);
 
     if (args.expert_node == nullptr) {
       if (main_thread_stop_flag_.load()) {
@@ -691,6 +718,7 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
   // }
 
   // stream.synchronize();
+  output_count_.fetch_add(1);
   pending_.fetch_sub(1);
   if (pending_.load() == 0) {
     pending_cv_.notify_all();
@@ -700,8 +728,7 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
 std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
   // int wait_count = 0;
 
-  std::unique_lock<std::mutex> lock(pending_mutex_);
-  pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
+  WaitForPendingZero("Wait");
 
   num_enqueued_.store(0);
   std::vector<CallResult> output_queue;
@@ -714,10 +741,78 @@ std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
 }
 
 torch::Tensor ExpertDispatcher::WaitHiddenStates() {
-  std::unique_lock<std::mutex> lock(pending_mutex_);
-  pending_cv_.wait(lock, [&] { return pending_.load() == 0; });
+  WaitForPendingZero("WaitHiddenStates");
   num_enqueued_.store(0);
   return final_hidden_states_;
+}
+
+void ExpertDispatcher::WaitForPendingZero(const char* caller) {
+  if (pending_.load() == 0) {
+    return;
+  }
+  pending_wait_count_.fetch_add(1);
+
+  constexpr auto kPollInterval = std::chrono::milliseconds(1000);
+  constexpr auto kLogInterval = std::chrono::seconds(30);
+  constexpr auto kStallTimeout = std::chrono::seconds(300);
+
+  auto wait_start = std::chrono::steady_clock::now();
+  auto last_log = wait_start;
+  auto last_progress = wait_start;
+  auto progress_signature = [&]() -> std::uint64_t {
+    return fetch_dequeue_count_.load() + exec_dequeue_count_.load() +
+           output_count_.load() + eviction_count_.load() +
+           no_victim_wait_count_.load();
+  };
+  std::uint64_t last_signature = progress_signature();
+
+  std::unique_lock<std::mutex> lock(pending_mutex_);
+  while (pending_.load() != 0) {
+    if (pending_cv_.wait_for(lock, kPollInterval,
+                             [&] { return pending_.load() == 0; })) {
+      break;
+    }
+    auto now = std::chrono::steady_clock::now();
+    auto signature = progress_signature();
+    if (signature != last_signature) {
+      last_signature = signature;
+      last_progress = now;
+    }
+    if (now - last_log >= kLogInterval) {
+      DLOG_WARN("ExpertDispatcher::", caller,
+                ": waiting for pending experts. pending ", pending_.load(),
+                " enqueue ", enqueue_count_.load(), " fetch_dequeue ",
+                fetch_dequeue_count_.load(), " exec_dequeue ",
+                exec_dequeue_count_.load(), " output ", output_count_.load(),
+                " eviction ", eviction_count_.load(), " no_victim_wait ",
+                no_victim_wait_count_.load());
+      last_log = now;
+    }
+    if (now - last_progress >= kStallTimeout) {
+      pending_stall_count_.fetch_add(1);
+      auto idle_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                         now - last_progress)
+                         .count();
+      std::ostringstream oss;
+      oss << "ExpertDispatcher::" << caller
+          << " progress stall: pending=" << pending_.load()
+          << " enqueue=" << enqueue_count_.load()
+          << " fetch_dequeue=" << fetch_dequeue_count_.load()
+          << " exec_dequeue=" << exec_dequeue_count_.load()
+          << " output=" << output_count_.load()
+          << " eviction=" << eviction_count_.load()
+          << " no_victim_wait=" << no_victim_wait_count_.load()
+          << " idle_us=" << idle_us;
+      throw std::runtime_error(oss.str());
+    }
+  }
+
+  auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::steady_clock::now() - wait_start)
+                     .count();
+  auto wait_us_u64 = static_cast<std::uint64_t>(wait_us);
+  pending_wait_total_us_.fetch_add(wait_us_u64);
+  RecordAtomicMax(pending_wait_max_us_, wait_us_u64);
 }
 
 void ExpertDispatcher::SetInputs(const torch::Tensor& hidden_states,
