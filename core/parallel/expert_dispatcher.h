@@ -71,6 +71,7 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::vector<CallResult> WaitExpert() { return Wait(); }
   torch::Tensor WaitHiddenStates();
+  void ResetExpertCacheState();
 
  private:
   void Enqueue(CallArgs& args);

@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace {
 void RecordAtomicMax(std::atomic<std::uint64_t>& target,
@@ -349,6 +350,60 @@ void ExpertDispatcher::ClearExpertCacheCounts() {
       expert_node->node->incache_visit_count = 0;
     }
   }
+}
+
+void ExpertDispatcher::ResetExpertCacheState() {
+  WaitForPendingZero("ResetExpertCacheState");
+  if (kTaskPool != nullptr) {
+    kTaskPool->ReplaceCacheCandidates({});
+  }
+
+  for (auto& queue : input_queue_) {
+    queue.Clear();
+  }
+  for (auto& queue : exec_queue_) {
+    queue.Clear();
+  }
+  {
+    std::lock_guard<std::mutex> lock(output_mutex_);
+    output_queue_.clear();
+  }
+
+  std::unordered_set<Node*> visited;
+  for (auto& expert_by_layer : experts_) {
+    for (auto& expert_node : expert_by_layer) {
+      if (expert_node == nullptr || expert_node->node == nullptr) {
+        continue;
+      }
+      auto node = expert_node->node;
+      if (visited.find(node.get()) != visited.end()) {
+        continue;
+      }
+      visited.insert(node.get());
+      std::unique_lock<std::mutex> node_lock(node->mutex);
+      if (node->device.is_cuda()) {
+        node->SetDevice(node->default_host);
+      }
+      node->incache_visit_count = 0;
+      node->unused_count = 0;
+      node->is_overflow = false;
+      node->io_state = NODE_STATE_NONE;
+      node->state = 0;
+      node->cv.notify_all();
+    }
+  }
+
+  for (int gpu_id = 0; gpu_id < kNumDevices(); ++gpu_id) {
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
+      cached_experts_[gpu_id].clear();
+      cache_sizes_[gpu_id] =
+          kTopologyHandle->GetSparseCacheLimit(torch::Device(torch::kCUDA, gpu_id));
+      gpu_overload_[gpu_id] = false;
+    }
+    cache_cv_[gpu_id].notify_all();
+  }
+  pending_.store(0);
 }
 
 // void ExpertDispatcher::GPUThreadFunc(int gpu_id) {

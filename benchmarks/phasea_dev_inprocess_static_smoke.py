@@ -11,6 +11,7 @@ import torch
 from transformers import AutoTokenizer
 
 from moe_infinity import MoE
+from moe_infinity.policies import OffloadingPolicyManager
 from moe_infinity.utils.qwen_benchmark import (
     aggregate_request_records,
     build_qwen_benchmark_config,
@@ -40,25 +41,26 @@ MODEL = Path(
 TRACE_DIR = Path(os.environ.get("DEV_TRACE_DIR", str(REPO / "benchmarks/traces/qwen")))
 TRACE_NAME = os.environ.get("DEV_TRACE_NAME", "mixed")
 OFFLOAD_CACHE_TEMPLATE = os.environ.get("DEV_OFFLOAD_CACHE_TEMPLATE", "")
+RESET_BETWEEN_CASES = os.environ.get("DEV_RESET_BETWEEN_CASES", "1") != "0"
 
 
 CASES: Dict[str, Dict[str, Any]] = {
-    "on_demand_dirty": {
+    "on_demand": {
         "enable_prefetch": False,
         "policy_disabled": True,
         "execution_mode": "disabled",
     },
-    "static_top4_replace_only_dirty": {
+    "static_top4_replace_only": {
         "enable_prefetch": True,
         "policy_disabled": False,
         "execution_mode": "replace_only",
     },
-    "static_top4_enqueue_only_dirty": {
+    "static_top4_enqueue_only": {
         "enable_prefetch": True,
         "policy_disabled": False,
         "execution_mode": "enqueue_only",
     },
-    "static_top4_replace_and_enqueue_dirty": {
+    "static_top4_replace_and_enqueue": {
         "enable_prefetch": True,
         "policy_disabled": False,
         "execution_mode": "replace_and_enqueue",
@@ -103,6 +105,57 @@ def _apply_case(model: MoE, case: Dict[str, Any]) -> None:
         module.expert_policy_score_only = False
 
 
+def _reset_tracer_runtime_state(model: MoE) -> None:
+    tracer = model.engine.expert_tracer
+    tracer.trace.clear()
+    persistent_capacity = int(getattr(tracer, "persistent_capacity", 0))
+    if hasattr(tracer, "trace_collection"):
+        tracer.trace_collection[persistent_capacity:] = 0
+    if hasattr(tracer, "collection_access"):
+        tracer.collection_access[persistent_capacity:] = 0
+
+
+def _reset_policy_runtime_state(model: MoE) -> None:
+    engine = model.engine
+    _reset_tracer_runtime_state(model)
+    engine.offloading_policy = OffloadingPolicyManager(
+        config=engine.archer_config,
+        tracer=engine.expert_tracer,
+        predictor=engine.expert_predictor,
+        model_tag=str(getattr(engine, "model_name", "")).lower(),
+    )
+    for module in getattr(engine, "expert_layer_modules", []):
+        module.expert_policy = engine.offloading_policy
+
+
+def _reset_runtime_state(model: MoE) -> Dict[str, Any]:
+    engine = model.engine
+    reset_info: Dict[str, Any] = {"enabled": bool(RESET_BETWEEN_CASES)}
+    if not RESET_BETWEEN_CASES:
+        reset_info["warning"] = "dirty runtime; GPU residency and policy state are reused"
+        return reset_info
+
+    torch.cuda.synchronize()
+    if hasattr(engine.archer_engine, "replace_cache_candidates"):
+        engine.archer_engine.replace_cache_candidates([])
+    if hasattr(engine.expert_dispatcher, "reset_expert_cache_state"):
+        engine.expert_dispatcher.reset_expert_cache_state()
+        reset_info["expert_cache_reset"] = True
+    else:
+        reset_info["expert_cache_reset"] = False
+        reset_info["warning"] = "dispatcher lacks reset_expert_cache_state"
+    if hasattr(engine.expert_dispatcher, "reset_runtime_stats"):
+        engine.expert_dispatcher.reset_runtime_stats()
+    if hasattr(engine.expert_dispatcher, "clear_expert_cache_counts"):
+        engine.expert_dispatcher.clear_expert_cache_counts()
+    prefetcher = getattr(engine, "expert_prefetcher", None)
+    if prefetcher is not None and hasattr(prefetcher, "reset_prefetch_runtime_stats"):
+        prefetcher.reset_prefetch_runtime_stats()
+    _reset_policy_runtime_state(model)
+    torch.cuda.synchronize()
+    return reset_info
+
+
 def _run_case(
     *,
     model: MoE,
@@ -113,12 +166,13 @@ def _run_case(
     max_new_tokens: int,
 ) -> Dict[str, Any]:
     case = CASES[case_name]
+    reset_info = _reset_runtime_state(model)
     _apply_case(model, case)
     dispatcher = model.engine.expert_dispatcher
     prefetcher = model.engine.expert_prefetcher
     records = []
-    previous_library_stats: Dict[str, int] = {}
-    previous_cache_stats: Dict[str, float | int] = {}
+    previous_library_stats: Dict[str, int] = _snapshot_library_stats(model)
+    previous_cache_stats: Dict[str, float | int] = _snapshot_cache_hit_rate(model)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "min_new_tokens": max_new_tokens,
@@ -224,9 +278,11 @@ def _run_case(
     return {
         "case_name": case_name,
         "case": case,
-        "dirty_runtime_warning": (
-            "This dev harness reuses one loaded model/runtime across cases. "
-            "GPU residency and policy history are not reset, so results are for fast code-path debugging only."
+        "reset_info": reset_info,
+        "protocol_note": (
+            "This harness loads one model process and resets runtime state before each case "
+            "when DEV_RESET_BETWEEN_CASES=1. Use it for fast iteration; validate final claims "
+            "with a new-process bracket run."
         ),
         "records": records,
         "aggregate": aggregate_request_records(records),
@@ -237,10 +293,11 @@ def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> 
     lines = [
         "# Dev In-Process Static Smoke",
         "",
-        "This is not a formal performance protocol. It keeps one loaded model/runtime across cases to reduce iteration latency.",
+        "This is a fast iteration protocol. It keeps one loaded model process and, by default, resets expert cache/policy state before each case.",
         "",
         f"- model_load_s: {setup_timing.get('model_load_s', 0.0):.2f}",
         f"- total_setup_s: {setup_timing.get('total_setup_s', 0.0):.2f}",
+        f"- reset_between_cases: {str(RESET_BETWEEN_CASES).lower()}",
         "",
         "| case | tok/s | ms/token | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -331,6 +388,7 @@ def main() -> None:
     payload = {
         "setup_timing": setup_timing,
         "offload_cache_template": OFFLOAD_CACHE_TEMPLATE,
+        "reset_between_cases": RESET_BETWEEN_CASES,
         "results": results,
     }
     (ROOT / "analysis" / "dev_inprocess_static_smoke.json").write_text(
