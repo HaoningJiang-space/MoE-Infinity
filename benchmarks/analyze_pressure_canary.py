@@ -105,6 +105,8 @@ def _log_counts(log_path: Path) -> Dict[str, Any]:
 def _case_status(raw_path: Path, log_info: Mapping[str, Any], exit_code: str | None) -> str:
     if raw_path.is_file() and exit_code in {None, "0"}:
         return "complete"
+    if exit_code not in {None, "0"}:
+        return "failed"
     if int(log_info.get("failure_marker_count", 0)) > 0:
         return "failed"
     if log_info.get("log_exists"):
@@ -177,6 +179,10 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         case["mode"] == "aggressive" and case["status"] == "failed"
         for case in summary["cases"]
     )
+    any_nonzero_exit = any(
+        str(case.get("exit_code") or "0") not in {"0", "None"}
+        for case in summary["cases"]
+    )
     any_no_victim = any(
         int(case.get("aggregate", {}).get("dispatcher_no_victim_wait_count_total", 0) or 0)
         > 0
@@ -243,9 +249,10 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "- On-demand failed, so this pressure point is too strong to isolate prefetch-induced progress issues.",
             "- Lower pressure or add demand progress fixes before using this point as evidence.",
         ]
-    elif any_aggressive_failed or any_no_victim or any_all_locked:
+    elif any_aggressive_failed or any_nonzero_exit or any_no_victim or any_all_locked:
         interpretation = [
-            "- Conservative success plus aggressive failure/no-victim/all-locked events supports the hypothesis that speculative expert traffic can violate progress under strong pressure.",
+            "- Aggressive prefetch produced a non-complete run or no-victim/all-locked events, supporting the hypothesis that speculative expert traffic can violate progress under strong pressure.",
+            "- If the exit was external termination, inspect the log and any captured stack artifact before treating it as a runtime fatal.",
             "- Treat this run as a robustness boundary, not a normal performance point.",
         ]
     elif has_dispatcher_pressure:
