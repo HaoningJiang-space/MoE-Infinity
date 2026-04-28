@@ -656,6 +656,13 @@ class OffloadEngine(object):
                 self.expert_prefetcher.prefetch_policy_disabled = bool(
                     getattr(self.archer_config, "prefetch_policy_disabled", False)
                 )
+                self.expert_prefetcher.prefetch_execution_mode = str(
+                    getattr(
+                        self.archer_config,
+                        "prefetch_execution_mode",
+                        "replace_and_enqueue",
+                    )
+                )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,

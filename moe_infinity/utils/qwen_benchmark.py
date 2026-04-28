@@ -62,6 +62,7 @@ def build_qwen_benchmark_config(
     prefetch_credit_count: int = -1,
     prefetch_credit_zero_action: str = "update_only",
     prefetch_policy_disabled: bool = False,
+    prefetch_execution_mode: str = "replace_and_enqueue",
     static_prefetch_plan_path: str = "",
     static_prefetch_default_topk: int = 8,
     historical_reuse_match_topk: int = 4,
@@ -214,6 +215,7 @@ def build_qwen_benchmark_config(
         "prefetch_credit_count": int(prefetch_credit_count),
         "prefetch_credit_zero_action": str(prefetch_credit_zero_action),
         "prefetch_policy_disabled": bool(prefetch_policy_disabled),
+        "prefetch_execution_mode": str(prefetch_execution_mode),
         "static_prefetch_plan_path": str(static_prefetch_plan_path),
         "static_prefetch_default_topk": int(static_prefetch_default_topk),
         "local_continuation_library_capacity": int(

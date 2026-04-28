@@ -194,6 +194,10 @@ class ArcherConfig:
         default=False,
         metadata={"help": "Disable Python expert-policy drive while keeping prefetch wiring enabled"},
     )
+    prefetch_execution_mode: str = field(
+        default="replace_and_enqueue",
+        metadata={"help": "Prefetch execution mode: replace_and_enqueue, replace_only, enqueue_only, or disabled"},
+    )
     static_prefetch_plan_path: str = field(
         default="",
         metadata={"help": "Optional JSON layer->expert plan for static no-sync prefetch diagnostics"},

@@ -29,6 +29,7 @@ class ExpertPrefetcher(object):
         self.prefetch_credit_count = -1
         self.prefetch_credit_zero_action = "update_only"
         self.prefetch_policy_disabled = False
+        self.prefetch_execution_mode = "replace_and_enqueue"
         self.reset_prefetch_runtime_stats()
 
     def set_archer_engine(self, archer_engine):
@@ -236,17 +237,46 @@ class ExpertPrefetcher(object):
         self._last_prefetch_plan_candidate_count = candidate_count
         self.archer_engine.replace_cache_candidates(tensor_ids)
 
+    def _execution_mode(self):
+        mode = str(
+            getattr(self, "prefetch_execution_mode", "replace_and_enqueue")
+            or "replace_and_enqueue"
+        )
+        valid = {
+            "replace_and_enqueue",
+            "replace_only",
+            "enqueue_only",
+            "disabled",
+        }
+        if mode not in valid:
+            raise ValueError(
+                f"Unsupported prefetch_execution_mode={mode!r}; "
+                f"expected one of {sorted(valid)}"
+            )
+        return mode
+
+    def _enqueue_prefetch_plan(self, tensor_ids):
+        for tensor_id in tensor_ids:
+            gpu_id = self.archer_engine.get_node_default_device([tensor_id])
+            self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
+            self._prefetch_runtime_stats["prefetch_enqueue_count"] += 1
+
+    def _execute_prefetch_plan(self, tensor_ids, *, allow_replace=True):
+        mode = self._execution_mode()
+        if mode in {"replace_and_enqueue", "replace_only"} and allow_replace:
+            self._replace_prefetch_plan(tensor_ids)
+        if mode in {"replace_and_enqueue", "enqueue_only"}:
+            self._enqueue_prefetch_plan(tensor_ids)
+
     def prefetch_experts_list(self, layer_id, expert_list):
         tensor_ids = []
         for j in expert_list:
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
         admitted_tensor_ids = self._admit_prefetch_tensor_ids(tensor_ids)
-        if bool(getattr(self, "prefetch_admission_enabled", False)):
-            self._replace_prefetch_plan(admitted_tensor_ids)
-        for tensor_id in admitted_tensor_ids:
-            gpu_id = self.archer_engine.get_node_default_device([tensor_id])
-            self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
-            self._prefetch_runtime_stats["prefetch_enqueue_count"] += 1
+        self._execute_prefetch_plan(
+            admitted_tensor_ids,
+            allow_replace=bool(getattr(self, "prefetch_admission_enabled", False)),
+        )
 
     def fetch_experts_lock_cache(self, layer_id, expert_list):
         tensor_ids = []
@@ -299,8 +329,4 @@ class ExpertPrefetcher(object):
         ]
         assert len(np.unique(tensor_ids)) == len(tensor_ids)
         admitted_tensor_ids = self._admit_prefetch_tensor_ids(tensor_ids)
-        self._replace_prefetch_plan(admitted_tensor_ids)
-        for tensor_id in admitted_tensor_ids:
-            gpu_id = self.archer_engine.get_node_default_device([tensor_id])
-            self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
-            self._prefetch_runtime_stats["prefetch_enqueue_count"] += 1
+        self._execute_prefetch_plan(admitted_tensor_ids)

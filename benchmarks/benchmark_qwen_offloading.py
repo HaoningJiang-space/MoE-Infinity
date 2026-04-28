@@ -105,6 +105,12 @@ def parse_args() -> argparse.Namespace:
         help="Keep prefetch wiring enabled but skip the Python expert-policy drive.",
     )
     parser.add_argument(
+        "--prefetch-execution-mode",
+        choices=("replace_and_enqueue", "replace_only", "enqueue_only", "disabled"),
+        default="replace_and_enqueue",
+        help="Split prefetch effects into candidate replacement, queue enqueue, both, or neither.",
+    )
+    parser.add_argument(
         "--static-prefetch-plan-path",
         default="",
         help="Optional JSON layer->expert plan for static no-sync prefetch diagnostics.",
@@ -235,6 +241,7 @@ def _run_case(
     prefetch_credit_count: int,
     prefetch_credit_zero_action: str,
     prefetch_policy_disabled: bool,
+    prefetch_execution_mode: str,
     static_prefetch_plan_path: str,
     static_prefetch_default_topk: int,
     historical_reuse_match_topk: int,
@@ -299,6 +306,7 @@ def _run_case(
         prefetch_credit_count=prefetch_credit_count,
         prefetch_credit_zero_action=prefetch_credit_zero_action,
         prefetch_policy_disabled=prefetch_policy_disabled,
+        prefetch_execution_mode=prefetch_execution_mode,
         static_prefetch_plan_path=static_prefetch_plan_path,
         static_prefetch_default_topk=static_prefetch_default_topk,
         historical_reuse_match_topk=historical_reuse_match_topk,
@@ -594,6 +602,7 @@ def main() -> None:
                 prefetch_credit_count=args.prefetch_credit_count,
                 prefetch_credit_zero_action=args.prefetch_credit_zero_action,
                 prefetch_policy_disabled=args.prefetch_policy_disabled,
+                prefetch_execution_mode=args.prefetch_execution_mode,
                 static_prefetch_plan_path=args.static_prefetch_plan_path,
                 static_prefetch_default_topk=args.static_prefetch_default_topk,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,

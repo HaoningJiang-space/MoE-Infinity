@@ -39,6 +39,7 @@ def test_build_qwen_benchmark_config_variants():
     assert static_hot["prefetch"] is True
     assert static_hot["offloading_policy"] == "static_hot_prefetch"
     assert static_hot["static_prefetch_default_topk"] == 4
+    assert static_hot["prefetch_execution_mode"] == "replace_and_enqueue"
 
     trace_prefetch = build_qwen_benchmark_config(
         variant="trace_similarity_prefetch",
@@ -87,12 +88,14 @@ def test_build_qwen_benchmark_config_variants():
         prefetch_credit_count=8,
         prefetch_credit_zero_action="skip_policy_update",
         prefetch_policy_disabled=True,
+        prefetch_execution_mode="replace_only",
     )
     assert credit_gated["historical_reuse_object_mode"] == "local_continuation"
     assert credit_gated["prefetch_credit_gated_enabled"] is True
     assert credit_gated["prefetch_credit_count"] == 8
     assert credit_gated["prefetch_credit_zero_action"] == "skip_policy_update"
     assert credit_gated["prefetch_policy_disabled"] is True
+    assert credit_gated["prefetch_execution_mode"] == "replace_only"
 
 
 def test_load_chat_trace_validates_schema(tmp_path):

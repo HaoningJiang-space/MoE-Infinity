@@ -11,21 +11,21 @@ from typing import Any, Dict, List
 
 ROOT = Path(
     os.environ.get(
-        "V26_ROOT",
-        "/data/ziheng/moe_infinity_fgo_runs/phasea_v26_static_prefetch_sanity",
+        "V27_ROOT",
+        "/data/ziheng/moe_infinity_fgo_runs/phasea_v27_retention_prefetch_ablation",
     )
 )
-REPO = Path(os.environ.get("V26_REPO", "/data/ziheng/projects/moe_infinity_fgo"))
+REPO = Path(os.environ.get("V27_REPO", "/data/ziheng/projects/moe_infinity_fgo"))
 PYTHON = Path(
-    os.environ.get("V26_PYTHON", "/home/ziheng/miniconda3/envs/mxmoe/bin/python")
+    os.environ.get("V27_PYTHON", "/home/ziheng/miniconda3/envs/mxmoe/bin/python")
 )
 MODEL = Path(
-    os.environ.get("V26_MODEL", "/data/ziheng/models/Qwen1.5-MoE-A2.7B-Chat")
+    os.environ.get("V27_MODEL", "/data/ziheng/models/Qwen1.5-MoE-A2.7B-Chat")
 )
-TRACE_DIR = Path(os.environ.get("V26_TRACE_DIR", str(REPO / "benchmarks/traces/qwen")))
-CUDA_VISIBLE_DEVICES = os.environ.get("V26_CUDA_VISIBLE_DEVICES", "1")
-TRACE_NAME = os.environ.get("V26_TRACE_NAME", "mixed")
-TIMEOUT_S = int(os.environ.get("V26_TIMEOUT_S", "1200"))
+TRACE_DIR = Path(os.environ.get("V27_TRACE_DIR", str(REPO / "benchmarks/traces/qwen")))
+CUDA_VISIBLE_DEVICES = os.environ.get("V27_CUDA_VISIBLE_DEVICES", "1")
+TRACE_NAME = os.environ.get("V27_TRACE_NAME", "mixed")
+TIMEOUT_S = int(os.environ.get("V27_TIMEOUT_S", "1200"))
 
 
 CASES: Dict[str, Dict[str, Any]] = {
@@ -40,18 +40,29 @@ CASES: Dict[str, Dict[str, Any]] = {
         "policy_disabled": False,
         "execution_mode": "replace_and_enqueue",
     },
-    "prefetch_enabled_no_policy": {
-        "variant": "history_reuse_local_backbone",
+    "static_top4_replace_only": {
+        "variant": "static_hot_prefetch",
         "future_layers": 4,
         "max_candidates": 32,
-        "static_topk": 8,
+        "static_topk": 4,
         "admission": True,
-        "credit_gated": False,
-        "credit_count": -1,
-        "policy_disabled": True,
-        "execution_mode": "replace_and_enqueue",
+        "credit_gated": True,
+        "credit_count": 8,
+        "policy_disabled": False,
+        "execution_mode": "replace_only",
     },
-    "static_hot_top4": {
+    "static_top4_enqueue_only": {
+        "variant": "static_hot_prefetch",
+        "future_layers": 4,
+        "max_candidates": 32,
+        "static_topk": 4,
+        "admission": True,
+        "credit_gated": True,
+        "credit_count": 8,
+        "policy_disabled": False,
+        "execution_mode": "enqueue_only",
+    },
+    "static_top4_replace_and_enqueue": {
         "variant": "static_hot_prefetch",
         "future_layers": 4,
         "max_candidates": 32,
@@ -62,18 +73,7 @@ CASES: Dict[str, Dict[str, Any]] = {
         "policy_disabled": False,
         "execution_mode": "replace_and_enqueue",
     },
-    "static_hot_top8": {
-        "variant": "static_hot_prefetch",
-        "future_layers": 4,
-        "max_candidates": 32,
-        "static_topk": 8,
-        "admission": True,
-        "credit_gated": True,
-        "credit_count": 8,
-        "policy_disabled": False,
-        "execution_mode": "replace_and_enqueue",
-    },
-    "local_sync_cap8": {
+    "local_sync_cap8_replace_and_enqueue": {
         "variant": "history_reuse_local_backbone",
         "future_layers": 4,
         "max_candidates": 32,
@@ -92,13 +92,13 @@ def _now() -> str:
 
 
 def _selected_case_names() -> List[str]:
-    requested = os.environ.get("V26_CASES")
+    requested = os.environ.get("V27_CASES")
     if not requested:
         return list(CASES)
     names = [item.strip() for item in requested.split(",") if item.strip()]
     unknown = [name for name in names if name not in CASES]
     if unknown:
-        raise ValueError(f"Unknown V26_CASES entries: {unknown}")
+        raise ValueError(f"Unknown V27_CASES entries: {unknown}")
     return names
 
 
@@ -117,16 +117,16 @@ def _cmd(case_root: Path, case: Dict[str, Any]) -> List[str]:
         "--traces",
         TRACE_NAME,
         "--warmup-requests",
-        os.environ.get("V26_WARMUP_REQUESTS", "2"),
+        os.environ.get("V27_WARMUP_REQUESTS", "2"),
         "--measured-requests",
-        os.environ.get("V26_MEASURED_REQUESTS", "16"),
+        os.environ.get("V27_MEASURED_REQUESTS", "16"),
         "--max-new-tokens",
-        os.environ.get("V26_MAX_NEW_TOKENS", "16"),
+        os.environ.get("V27_MAX_NEW_TOKENS", "16"),
         "--fixed-new-tokens",
         "--max-input-length",
-        os.environ.get("V26_MAX_INPUT_LENGTH", "128"),
+        os.environ.get("V27_MAX_INPUT_LENGTH", "128"),
         "--device-memory-ratio",
-        os.environ.get("V26_DEVICE_MEMORY_RATIO", "0.30"),
+        os.environ.get("V27_DEVICE_MEMORY_RATIO", "0.30"),
         "--num-threads",
         "1",
         "--library-capacity",
@@ -224,28 +224,32 @@ def _run_case(name: str) -> Dict[str, Any]:
     loaded = _load_result(case_root, case)
     loaded["case_name"] = name
     loaded["returncode"] = returncode
+    loaded["execution_mode"] = case["execution_mode"]
     shutil.rmtree(case_root / "offload", ignore_errors=True)
     return loaded
 
 
 def _render_summary(results: Dict[str, Any]) -> str:
     lines = [
-        "# V26 Static Prefetch Sanity",
+        "# V27 Retention vs Prefetch Ablation",
         "",
-        "Purpose: separate no-sync prefetch data-plane behavior from synchronous local-continuation trace capture.",
+        "Purpose: separate candidate-set retention from true queued H2D prefetch.",
         "",
-        "| case | rc | failed | tok/s | ms/token | runtime enqueue | queue push | same-device skip | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | miss | evict | stall |",
-        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| case | mode | rc | failed | tok/s | ms/token | candidates | admitted | runtime enqueue | queue push | same-device skip | dequeue | complete | queue cleared | resident hit | late miss | miss | evict | stall |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, result in results.items():
         agg = result.get("aggregate", {})
         lines.append(
-            "| {name} | {rc} | {failed} | {tps:.3f} | {mpt:.2f} | {rt_enq} | {rt_push} | {same_dev} | {rt_deq} | {rt_comp} | {cleared} | {resident} | {late} | {miss} | {evict} | {stall} |".format(
+            "| {name} | {mode} | {rc} | {failed} | {tps:.3f} | {mpt:.2f} | {cand} | {admit} | {rt_enq} | {rt_push} | {same_dev} | {rt_deq} | {rt_comp} | {cleared} | {resident} | {late} | {miss} | {evict} | {stall} |".format(
                 name=name,
+                mode=result.get("execution_mode", ""),
                 rc=result.get("returncode", ""),
                 failed=str(bool(result.get("failed", False))).lower(),
                 tps=float(agg.get("generated_tokens_per_second", 0.0)),
                 mpt=float(agg.get("latency_per_generated_token_mean_ms", 0.0)),
+                cand=agg.get("prefetch_candidate_count_total", 0),
+                admit=agg.get("prefetch_admitted_count_total", 0),
                 rt_enq=agg.get("prefetch_runtime_enqueue_count_total", 0),
                 rt_push=agg.get("prefetch_runtime_queue_push_count_total", 0),
                 same_dev=agg.get(
@@ -264,12 +268,11 @@ def _render_summary(results: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Interpretation rule:",
+            "Decision rules:",
             "",
-            "- If static cases complete and show runtime complete/resident-hit counters, the prefetch data path is alive without sync trace capture.",
-            "- If static cases enqueue but queue-push/dequeue/complete stay near zero, they are retention/candidate-set effects, not real H2D prefetch hits.",
-            "- If static cases stay near on-demand but local_sync_cap8 remains slow, the bottleneck is the synchronous policy/control path.",
-            "- If static cases enqueue but have high queue-cleared or late-miss counts, the lifecycle/cancellation semantics are the next target.",
+            "- If replace_only matches replace_and_enqueue, the observed benefit is candidate-set retention.",
+            "- If enqueue_only gets queue_push/complete/resident_hit and improves latency or miss count, true H2D prefetch is useful.",
+            "- If enqueue_only has queue_push but no resident_hit, prefetch timeliness/lifecycle is the next bottleneck.",
             "",
         ]
     )
@@ -291,11 +294,11 @@ def main() -> None:
             )
     analysis = ROOT / "analysis"
     analysis.mkdir(parents=True, exist_ok=True)
-    (analysis / "v26_static_prefetch_sanity.json").write_text(
+    (analysis / "v27_retention_prefetch_ablation.json").write_text(
         json.dumps(results, indent=2),
         encoding="utf-8",
     )
-    (analysis / "v26_static_prefetch_sanity.md").write_text(
+    (analysis / "v27_retention_prefetch_ablation.md").write_text(
         _render_summary(results),
         encoding="utf-8",
     )
