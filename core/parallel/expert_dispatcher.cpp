@@ -212,6 +212,12 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
 
   if (expert_node->node->device.is_cuda()) {
     cache_hit_fetch_count_.fetch_add(1);
+    if (kTaskPool != nullptr && kTaskPool->IsCacheCandidate(expert_node->node)) {
+      candidate_resident_hit_count_.fetch_add(1);
+    }
+    if ((expert_node->node->io_state & NODE_STATE_PREFETCHED) != 0) {
+      prefetch_resident_hit_count_.fetch_add(1);
+    }
     args.gpu_id = expert_node->node->device.index();
 
     auto original_device = (args.remote) ? CPU_DEVICE : hidden_states_.device();
@@ -276,6 +282,10 @@ std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
       pending_stall_count_.load(),
       prefetch_resident_hit_count_.load(),
       late_prefetch_demand_miss_count_.load(),
+      demand_candidate_protect_skip_count_.load(),
+      demand_candidate_protect_fallback_count_.load(),
+      candidate_resident_hit_count_.load(),
+      candidate_demand_miss_count_.load(),
   };
 }
 
@@ -300,6 +310,10 @@ void ExpertDispatcher::ResetRuntimeStats() {
   pending_stall_count_.store(0);
   prefetch_resident_hit_count_.store(0);
   late_prefetch_demand_miss_count_.store(0);
+  demand_candidate_protect_skip_count_.store(0);
+  demand_candidate_protect_fallback_count_.store(0);
+  candidate_resident_hit_count_.store(0);
+  candidate_demand_miss_count_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -345,20 +359,38 @@ void ExpertDispatcher::ClearExpertCacheCounts() {
 ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
   uint64_t min_visit_count = INT_MAX;
   ExpertNodePtr evict_expert_node = nullptr;
+  bool skipped_candidate = false;
+  const bool protect_candidates =
+      kTaskPool != nullptr &&
+      kTaskPool->CandidateDemandEvictionProtectionEnabled();
 
-  for (auto& key : cached_experts_[gpu_id]) {
-    auto layer_idx = key >> 32;
-    auto expert_idx = key & 0xFFFFFFFF;
-    auto node = experts_[expert_idx][layer_idx]->node;
-    if (node == nullptr) continue;
-    if (node->device.is_cuda() && node->incache_visit_count < min_visit_count &&
-        node->mutex.try_lock()) {
-      if (evict_expert_node != nullptr) {
-        evict_expert_node->node->mutex.unlock();
+  auto scan = [&](bool allow_candidates) {
+    for (auto& key : cached_experts_[gpu_id]) {
+      auto layer_idx = key >> 32;
+      auto expert_idx = key & 0xFFFFFFFF;
+      auto node = experts_[expert_idx][layer_idx]->node;
+      if (node == nullptr) continue;
+      if (!allow_candidates && protect_candidates &&
+          kTaskPool->IsCacheCandidate(node)) {
+        skipped_candidate = true;
+        demand_candidate_protect_skip_count_.fetch_add(1);
+        continue;
       }
-      evict_expert_node = experts_[expert_idx][layer_idx];
-      min_visit_count = node->incache_visit_count;
+      if (node->device.is_cuda() &&
+          node->incache_visit_count < min_visit_count && node->mutex.try_lock()) {
+        if (evict_expert_node != nullptr) {
+          evict_expert_node->node->mutex.unlock();
+        }
+        evict_expert_node = experts_[expert_idx][layer_idx];
+        min_visit_count = node->incache_visit_count;
+      }
     }
+  };
+
+  scan(/*allow_candidates=*/false);
+  if (evict_expert_node == nullptr && skipped_candidate) {
+    demand_candidate_protect_fallback_count_.fetch_add(1);
+    scan(/*allow_candidates=*/true);
   }
   return evict_expert_node;
 }
@@ -405,13 +437,21 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
 
     auto expert_node = experts_[expert_idx][layer_idx];
     bool cache_hit = expert_node->node->device.is_cuda();
+    bool is_candidate = kTaskPool != nullptr &&
+                        kTaskPool->IsCacheCandidate(expert_node->node);
     if (cache_hit) {
       cache_hit_fetch_count_.fetch_add(1);
+      if (is_candidate) {
+        candidate_resident_hit_count_.fetch_add(1);
+      }
       if ((expert_node->node->io_state & NODE_STATE_PREFETCHED) != 0) {
         prefetch_resident_hit_count_.fetch_add(1);
       }
     } else {
       cache_miss_fetch_count_.fetch_add(1);
+      if (is_candidate) {
+        candidate_demand_miss_count_.fetch_add(1);
+      }
       if (kTaskPool != nullptr &&
           kTaskPool->HasPendingPrefetch(expert_node->node)) {
         late_prefetch_demand_miss_count_.fetch_add(1);

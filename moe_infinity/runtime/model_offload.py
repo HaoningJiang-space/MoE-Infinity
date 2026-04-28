@@ -663,6 +663,24 @@ class OffloadEngine(object):
                         "replace_and_enqueue",
                     )
                 )
+                self.expert_prefetcher.prefetch_retention_protect_demand_eviction = (
+                    bool(
+                        getattr(
+                            self.archer_config,
+                            "prefetch_retention_protect_demand_eviction",
+                            False,
+                        )
+                    )
+                )
+                if hasattr(
+                    self.archer_engine,
+                    "set_candidate_demand_eviction_protection",
+                ):
+                    self.archer_engine.set_candidate_demand_eviction_protection(
+                        bool(
+                            self.expert_prefetcher.prefetch_retention_protect_demand_eviction
+                        )
+                    )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,

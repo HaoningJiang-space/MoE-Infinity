@@ -224,6 +224,13 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   kTaskPool->EnqueueTask(task);
 }
 
+void ArcherPrefetchHandle::SetCandidateDemandEvictionProtection(bool enabled) {
+  if (kTaskPool == nullptr) {
+    return;
+  }
+  kTaskPool->SetCandidateDemandEvictionProtection(enabled);
+}
+
 std::vector<std::uint64_t> ArcherPrefetchHandle::GetPrefetchLifecycleStats()
     const {
   if (kTaskPool == nullptr) {

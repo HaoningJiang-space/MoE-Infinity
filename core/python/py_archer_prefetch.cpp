@@ -82,6 +82,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("replace_cache_candidates",
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)
+      .def("set_candidate_demand_eviction_protection",
+           &ArcherPrefetchHandle::SetCandidateDemandEvictionProtection)
       .def("get_prefetch_lifecycle_stats",
            &ArcherPrefetchHandle::GetPrefetchLifecycleStats)
       .def("reset_prefetch_lifecycle_stats",

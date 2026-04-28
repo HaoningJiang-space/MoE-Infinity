@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List
+
+import torch
+from transformers import AutoTokenizer
+
+from moe_infinity import MoE
+from moe_infinity.utils.qwen_benchmark import (
+    aggregate_request_records,
+    build_qwen_benchmark_config,
+    count_request_input_tokens,
+    diff_counter_dict,
+    discover_trace_files,
+    load_chat_trace,
+)
+from benchmarks.benchmark_qwen_offloading import (
+    _snapshot_cache_hit_rate,
+    _snapshot_dispatcher_stats,
+    _snapshot_library_stats,
+    _snapshot_prefetcher_stats,
+)
+
+
+ROOT = Path(
+    os.environ.get(
+        "DEV_ROOT",
+        "/data/ziheng/moe_infinity_fgo_runs/phasea_dev_inprocess_static_smoke",
+    )
+)
+REPO = Path(os.environ.get("DEV_REPO", "/data/ziheng/projects/moe_infinity_fgo"))
+MODEL = Path(
+    os.environ.get("DEV_MODEL", "/data/ziheng/models/Qwen1.5-MoE-A2.7B-Chat")
+)
+TRACE_DIR = Path(os.environ.get("DEV_TRACE_DIR", str(REPO / "benchmarks/traces/qwen")))
+TRACE_NAME = os.environ.get("DEV_TRACE_NAME", "mixed")
+OFFLOAD_CACHE_TEMPLATE = os.environ.get("DEV_OFFLOAD_CACHE_TEMPLATE", "")
+
+
+CASES: Dict[str, Dict[str, Any]] = {
+    "on_demand_dirty": {
+        "enable_prefetch": False,
+        "policy_disabled": True,
+        "execution_mode": "disabled",
+    },
+    "static_top4_replace_only_dirty": {
+        "enable_prefetch": True,
+        "policy_disabled": False,
+        "execution_mode": "replace_only",
+    },
+    "static_top4_enqueue_only_dirty": {
+        "enable_prefetch": True,
+        "policy_disabled": False,
+        "execution_mode": "enqueue_only",
+    },
+    "static_top4_replace_and_enqueue_dirty": {
+        "enable_prefetch": True,
+        "policy_disabled": False,
+        "execution_mode": "replace_and_enqueue",
+    },
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _selected_case_names() -> List[str]:
+    requested = os.environ.get("DEV_CASES")
+    if not requested:
+        return list(CASES)
+    names = [item.strip() for item in requested.split(",") if item.strip()]
+    unknown = [name for name in names if name not in CASES]
+    if unknown:
+        raise ValueError(f"Unknown DEV_CASES entries: {unknown}")
+    return names
+
+
+def _apply_case(model: MoE, case: Dict[str, Any]) -> None:
+    engine = model.engine
+    prefetcher = engine.expert_prefetcher
+    prefetcher.prefetch_policy_disabled = bool(case["policy_disabled"])
+    prefetcher.prefetch_execution_mode = str(case["execution_mode"])
+    prefetcher.prefetch_future_layers = 4
+    prefetcher.prefetch_max_candidates = 32
+    prefetcher.prefetch_admission_enabled = True
+    prefetcher.prefetch_admission_demand_reserve = 2
+    prefetcher.prefetch_credit_gated_enabled = True
+    prefetcher.prefetch_credit_count = 8
+    prefetcher.prefetch_credit_zero_action = "update_only"
+    prefetcher.prefetch_retention_protect_demand_eviction = False
+    if hasattr(prefetcher.archer_engine, "set_candidate_demand_eviction_protection"):
+        prefetcher.archer_engine.set_candidate_demand_eviction_protection(False)
+    if hasattr(prefetcher.archer_engine, "replace_cache_candidates"):
+        prefetcher.archer_engine.replace_cache_candidates([])
+    for module in getattr(engine, "expert_layer_modules", []):
+        module.enable_expert_prefetch = bool(case["enable_prefetch"])
+        module.expert_policy_score_only = False
+
+
+def _run_case(
+    *,
+    model: MoE,
+    tokenizer,
+    requests,
+    case_name: str,
+    max_input_length: int,
+    max_new_tokens: int,
+) -> Dict[str, Any]:
+    case = CASES[case_name]
+    _apply_case(model, case)
+    dispatcher = model.engine.expert_dispatcher
+    prefetcher = model.engine.expert_prefetcher
+    records = []
+    previous_library_stats: Dict[str, int] = {}
+    previous_cache_stats: Dict[str, float | int] = {}
+    generation_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "min_new_tokens": max_new_tokens,
+        "do_sample": False,
+        "pad_token_id": tokenizer.eos_token_id,
+    }
+    device = torch.device("cuda:0")
+
+    for index, request in enumerate(requests):
+        if hasattr(dispatcher, "reset_runtime_stats"):
+            dispatcher.reset_runtime_stats()
+        if hasattr(prefetcher, "reset_prefetch_runtime_stats"):
+            prefetcher.reset_prefetch_runtime_stats()
+        prompt = tokenizer.apply_chat_template(
+            request.messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        input_token_count = count_request_input_tokens(tokenizer, request.messages)
+        encoded = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=max_input_length,
+            return_tensors="pt",
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        model.engine.phasea_request_context = {
+            "request_id": request.request_id,
+            "trace_name": TRACE_NAME,
+            "tag": request.tag,
+            "variant": case_name,
+            "is_warmup": False,
+        }
+
+        start = time.perf_counter()
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs,
+            )
+        latency_s = time.perf_counter() - start
+        generated_ids = outputs[0][input_ids.shape[1] :]
+
+        library_stats = _snapshot_library_stats(model)
+        library_stats_delta = diff_counter_dict(
+            library_stats,
+            previous_library_stats,
+            keys=(
+                "query_count",
+                "hit_count",
+                "admit_count",
+                "duplicate_update_count",
+            ),
+        )
+        cache_hit_rate_snapshot = _snapshot_cache_hit_rate(model)
+        cache_hit_rate_delta = diff_counter_dict(
+            cache_hit_rate_snapshot,
+            previous_cache_stats,
+            keys=(
+                "visit_count",
+                "gpu_visit_count",
+                "cpu_visit_count",
+                "hit_count",
+                "gpu_hit_count",
+                "cpu_hit_count",
+                "prefetch_count",
+            ),
+        )
+        if cache_hit_rate_delta.get("visit_count", 0) > 0:
+            cache_hit_rate_delta["overall_hit_rate"] = (
+                cache_hit_rate_delta["hit_count"] / cache_hit_rate_delta["visit_count"]
+            )
+        else:
+            cache_hit_rate_delta["overall_hit_rate"] = 0.0
+
+        records.append(
+            {
+                "trace_name": TRACE_NAME,
+                "variant": case_name,
+                "request_index": index,
+                "request_id": request.request_id,
+                "tag": request.tag,
+                "is_warmup": False,
+                "input_tokens": input_token_count,
+                "latency_s": latency_s,
+                "generated_tokens": int(generated_ids.numel()),
+                "latency_per_generated_token_ms": (
+                    latency_s * 1000.0 / max(int(generated_ids.numel()), 1)
+                ),
+                "dispatcher_stats": _snapshot_dispatcher_stats(dispatcher),
+                "prefetcher_stats": _snapshot_prefetcher_stats(model),
+                "library_stats": library_stats,
+                "library_stats_delta": library_stats_delta,
+                "cache_hit_rate_snapshot": cache_hit_rate_snapshot,
+                "cache_hit_rate_delta": cache_hit_rate_delta,
+            }
+        )
+        previous_library_stats = library_stats
+        previous_cache_stats = cache_hit_rate_snapshot
+
+    return {
+        "case_name": case_name,
+        "case": case,
+        "dirty_runtime_warning": (
+            "This dev harness reuses one loaded model/runtime across cases. "
+            "GPU residency and policy history are not reset, so results are for fast code-path debugging only."
+        ),
+        "records": records,
+        "aggregate": aggregate_request_records(records),
+    }
+
+
+def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> str:
+    lines = [
+        "# Dev In-Process Static Smoke",
+        "",
+        "This is not a formal performance protocol. It keeps one loaded model/runtime across cases to reduce iteration latency.",
+        "",
+        f"- model_load_s: {setup_timing.get('model_load_s', 0.0):.2f}",
+        f"- total_setup_s: {setup_timing.get('total_setup_s', 0.0):.2f}",
+        "",
+        "| case | tok/s | ms/token | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, result in results.items():
+        agg = result.get("aggregate", {})
+        lines.append(
+            "| {name} | {tps:.3f} | {mpt:.2f} | {cand} | {admit} | {rt_enq} | {push} | {skip} | {comp} | {miss} | {evict} |".format(
+                name=name,
+                tps=float(agg.get("generated_tokens_per_second", 0.0)),
+                mpt=float(agg.get("latency_per_generated_token_mean_ms", 0.0)),
+                cand=agg.get("prefetch_candidate_count_total", 0),
+                admit=agg.get("prefetch_admitted_count_total", 0),
+                rt_enq=agg.get("prefetch_runtime_enqueue_count_total", 0),
+                push=agg.get("prefetch_runtime_queue_push_count_total", 0),
+                skip=agg.get("prefetch_runtime_same_device_skip_count_total", 0),
+                comp=agg.get("prefetch_runtime_complete_count_total", 0),
+                miss=agg.get("dispatcher_cache_miss_fetch_count_total", 0),
+                evict=agg.get("dispatcher_eviction_count_total", 0),
+            )
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    if not OFFLOAD_CACHE_TEMPLATE:
+        raise ValueError("Set DEV_OFFLOAD_CACHE_TEMPLATE to a prepared offload cache.")
+    ROOT.mkdir(parents=True, exist_ok=True)
+    (ROOT / "raw").mkdir(exist_ok=True)
+    (ROOT / "analysis").mkdir(exist_ok=True)
+    (ROOT / "driver.log").write_text("", encoding="utf-8")
+
+    trace_files = discover_trace_files(TRACE_DIR)
+    trace_path = trace_files[TRACE_NAME]
+    measured_requests = int(os.environ.get("DEV_MEASURED_REQUESTS", "2"))
+    max_input_length = int(os.environ.get("DEV_MAX_INPUT_LENGTH", "128"))
+    max_new_tokens = int(os.environ.get("DEV_MAX_NEW_TOKENS", "8"))
+    requests = load_chat_trace(trace_path)[:measured_requests]
+
+    setup_start = time.perf_counter()
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL,
+        trust_remote_code=True,
+        use_fast=False,
+    )
+    config = build_qwen_benchmark_config(
+        variant="static_hot_prefetch",
+        offload_path=OFFLOAD_CACHE_TEMPLATE,
+        device_memory_ratio=float(os.environ.get("DEV_DEVICE_MEMORY_RATIO", "0.30")),
+        num_threads=1,
+        library_capacity=32,
+        library_metric="cosine",
+        library_admission="diversity_aware",
+        prefetch_future_layers=4,
+        prefetch_max_candidates=32,
+        prefetch_admission_enabled=True,
+        prefetch_credit_gated_enabled=True,
+        prefetch_credit_count=8,
+        prefetch_execution_mode="replace_only",
+        static_prefetch_default_topk=4,
+    )
+    model_start = time.perf_counter()
+    model = MoE(str(MODEL), config)
+    setup_timing = {
+        "model_load_s": time.perf_counter() - model_start,
+        "total_setup_s": time.perf_counter() - setup_start,
+    }
+
+    results: Dict[str, Any] = {}
+    try:
+        for case_name in _selected_case_names():
+            with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
+                log.write(f"[{_now()}] start {case_name}\n")
+            results[case_name] = _run_case(
+                model=model,
+                tokenizer=tokenizer,
+                requests=requests,
+                case_name=case_name,
+                max_input_length=max_input_length,
+                max_new_tokens=max_new_tokens,
+            )
+            with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
+                log.write(f"[{_now()}] done {case_name}\n")
+    finally:
+        del model
+        torch.cuda.empty_cache()
+
+    payload = {
+        "setup_timing": setup_timing,
+        "offload_cache_template": OFFLOAD_CACHE_TEMPLATE,
+        "results": results,
+    }
+    (ROOT / "analysis" / "dev_inprocess_static_smoke.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+    (ROOT / "analysis" / "dev_inprocess_static_smoke.md").write_text(
+        _render_summary(results, setup_timing),
+        encoding="utf-8",
+    )
+
+
+if __name__ == "__main__":
+    main()

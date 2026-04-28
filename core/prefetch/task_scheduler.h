@@ -65,6 +65,16 @@ class ArcherTaskPool : public base::noncopyable {
     }
     return false;
   }
+  bool IsCacheCandidate(const NodePtr& node) const {
+    std::lock_guard<std::mutex> lock(candidates_mutex_);
+    return candidates_.find(node) != candidates_.end();
+  }
+  void SetCandidateDemandEvictionProtection(bool enabled) {
+    candidate_demand_eviction_protection_.store(enabled);
+  }
+  bool CandidateDemandEvictionProtectionEnabled() const {
+    return candidate_demand_eviction_protection_.load();
+  }
   std::vector<std::uint64_t> GetPrefetchLifecycleStats() const {
     return {
         prefetch_plan_replace_count_.load(),
@@ -157,13 +167,14 @@ class ArcherTaskPool : public base::noncopyable {
   std::unordered_map<std::uint64_t, TaskPtr> exec_queue_;
   std::mutex exec_mutex_;
   std::mutex unified_mutex_;
-  std::mutex candidates_mutex_;
+  mutable std::mutex candidates_mutex_;
 
   std::vector<std::list<std::thread>> exec_threads_;
 
   std::unordered_set<NodePtr> candidates_;
 
   std::atomic<bool> main_thread_stop_flag_;
+  std::atomic<bool> candidate_demand_eviction_protection_{false};
   std::atomic<std::uint64_t> prefetch_plan_replace_count_{0};
   std::atomic<std::uint64_t> prefetch_plan_empty_replace_count_{0};
   std::atomic<std::uint64_t> prefetch_plan_candidate_count_{0};

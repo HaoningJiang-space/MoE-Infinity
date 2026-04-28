@@ -36,6 +36,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument(
+        "--offload-cache-template",
+        default="",
+        help="Existing offload directory containing archer_index/archer_param files to reuse.",
+    )
+    parser.add_argument(
+        "--offload-cache-mode",
+        choices=("fresh", "shared"),
+        default="fresh",
+        help="fresh builds a new offload store; shared reuses --offload-cache-template directly.",
+    )
     parser.add_argument("--trace-dir", default=None)
     parser.add_argument(
         "--variants",
@@ -109,6 +120,11 @@ def parse_args() -> argparse.Namespace:
         choices=("replace_and_enqueue", "replace_only", "enqueue_only", "disabled"),
         default="replace_and_enqueue",
         help="Split prefetch effects into candidate replacement, queue enqueue, both, or neither.",
+    )
+    parser.add_argument(
+        "--prefetch-retention-protect-demand-eviction",
+        action="store_true",
+        help="Protect prefetch candidates from demand eviction before fallback.",
     )
     parser.add_argument(
         "--static-prefetch-plan-path",
@@ -242,6 +258,7 @@ def _run_case(
     prefetch_credit_zero_action: str,
     prefetch_policy_disabled: bool,
     prefetch_execution_mode: str,
+    prefetch_retention_protect_demand_eviction: bool,
     static_prefetch_plan_path: str,
     static_prefetch_default_topk: int,
     historical_reuse_match_topk: int,
@@ -257,11 +274,15 @@ def _run_case(
     phasea_max_ranked_candidates: int,
     phasea_analysis_future_layers: int,
     phasea_analysis_max_ranked_candidates: int,
+    offload_cache_template: str,
+    offload_cache_mode: str,
 ) -> Dict[str, Any]:
     case_paths = prepare_case_paths(
         output_root=output_root,
         trace_name=trace_name,
         variant=variant,
+        offload_cache_template=offload_cache_template,
+        offload_cache_mode=offload_cache_mode,
     )
     requests = load_chat_trace(trace_path)
     total_requests = warmup_requests + measured_requests
@@ -272,17 +293,22 @@ def _run_case(
         )
     selected_requests = requests[:total_requests]
     device = torch.device("cuda:0")
+    setup_timing: Dict[str, float] = {}
+    setup_start = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
         trust_remote_code=True,
         use_fast=False,
     )
+    setup_timing["tokenizer_load_s"] = time.perf_counter() - setup_start
+    preflight_start = time.perf_counter()
     trace_preflight = validate_requests_within_token_budget(
         tokenizer,
         selected_requests,
         max_input_length=max_input_length,
         trace_name=trace_name,
     )
+    setup_timing["trace_preflight_s"] = time.perf_counter() - preflight_start
     config = build_qwen_benchmark_config(
         variant=variant,
         offload_path=case_paths["offload_path"],
@@ -307,6 +333,9 @@ def _run_case(
         prefetch_credit_zero_action=prefetch_credit_zero_action,
         prefetch_policy_disabled=prefetch_policy_disabled,
         prefetch_execution_mode=prefetch_execution_mode,
+        prefetch_retention_protect_demand_eviction=(
+            prefetch_retention_protect_demand_eviction
+        ),
         static_prefetch_plan_path=static_prefetch_plan_path,
         static_prefetch_default_topk=static_prefetch_default_topk,
         historical_reuse_match_topk=historical_reuse_match_topk,
@@ -321,7 +350,14 @@ def _run_case(
         phasea_analysis_max_ranked_candidates=phasea_analysis_max_ranked_candidates,
         policy_score_only_override=True if policy_score_only else None,
     )
+    model_start = time.perf_counter()
     model = MoE(model_path, config)
+    setup_timing["model_load_s"] = time.perf_counter() - model_start
+    setup_timing["total_before_generation_s"] = (
+        setup_timing["tokenizer_load_s"]
+        + setup_timing["trace_preflight_s"]
+        + setup_timing["model_load_s"]
+    )
     recorder = None
     if phasea_events:
         recorder = PhaseAObservationRecorder(
@@ -413,12 +449,19 @@ def _run_case(
                     "variant": variant,
                     "config": config,
                     "offload_path": case_paths["offload_path"],
+                    "offload_cache_template": case_paths.get(
+                        "offload_cache_template", ""
+                    ),
+                    "offload_cache_mode": case_paths.get(
+                        "offload_cache_mode", "fresh"
+                    ),
                     "warmup_requests": warmup_requests,
                     "measured_requests": measured_requests,
                     "max_new_tokens": max_new_tokens,
                     "fixed_new_tokens": bool(fixed_new_tokens),
                     "max_input_length": max_input_length,
                     "generation_kwargs": generation_kwargs,
+                    "setup_timing": setup_timing,
                     "trace_preflight": trace_preflight,
                     "phasea_events_jsonl": (
                         case_paths["phasea_events_jsonl"] if phasea_events else None
@@ -508,12 +551,15 @@ def _run_case(
             "variant": variant,
             "config": config,
             "offload_path": case_paths["offload_path"],
+            "offload_cache_template": case_paths.get("offload_cache_template", ""),
+            "offload_cache_mode": case_paths.get("offload_cache_mode", "fresh"),
             "warmup_requests": warmup_requests,
             "measured_requests": measured_requests,
             "max_new_tokens": max_new_tokens,
             "fixed_new_tokens": bool(fixed_new_tokens),
             "max_input_length": max_input_length,
             "generation_kwargs": generation_kwargs,
+            "setup_timing": setup_timing,
             "trace_preflight": trace_preflight,
             "phasea_events_jsonl": (
                 case_paths["phasea_events_jsonl"] if phasea_events else None
@@ -603,6 +649,9 @@ def main() -> None:
                 prefetch_credit_zero_action=args.prefetch_credit_zero_action,
                 prefetch_policy_disabled=args.prefetch_policy_disabled,
                 prefetch_execution_mode=args.prefetch_execution_mode,
+                prefetch_retention_protect_demand_eviction=(
+                    args.prefetch_retention_protect_demand_eviction
+                ),
                 static_prefetch_plan_path=args.static_prefetch_plan_path,
                 static_prefetch_default_topk=args.static_prefetch_default_topk,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,
@@ -618,6 +667,8 @@ def main() -> None:
                 phasea_max_ranked_candidates=args.phasea_max_ranked_candidates,
                 phasea_analysis_future_layers=args.phasea_analysis_future_layers,
                 phasea_analysis_max_ranked_candidates=args.phasea_analysis_max_ranked_candidates,
+                offload_cache_template=args.offload_cache_template,
+                offload_cache_mode=args.offload_cache_mode,
             )
             trace_results[trace_name][variant] = case_result
 

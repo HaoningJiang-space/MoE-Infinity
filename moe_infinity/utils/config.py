@@ -198,6 +198,10 @@ class ArcherConfig:
         default="replace_and_enqueue",
         metadata={"help": "Prefetch execution mode: replace_and_enqueue, replace_only, enqueue_only, or disabled"},
     )
+    prefetch_retention_protect_demand_eviction: bool = field(
+        default=False,
+        metadata={"help": "Protect current prefetch candidates from demand-path eviction before fallback"},
+    )
     static_prefetch_plan_path: str = field(
         default="",
         metadata={"help": "Optional JSON layer->expert plan for static no-sync prefetch diagnostics"},

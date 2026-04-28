@@ -124,6 +124,10 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> pending_stall_count_{0};
   std::atomic<std::uint64_t> prefetch_resident_hit_count_{0};
   std::atomic<std::uint64_t> late_prefetch_demand_miss_count_{0};
+  std::atomic<std::uint64_t> demand_candidate_protect_skip_count_{0};
+  std::atomic<std::uint64_t> demand_candidate_protect_fallback_count_{0};
+  std::atomic<std::uint64_t> candidate_resident_hit_count_{0};
+  std::atomic<std::uint64_t> candidate_demand_miss_count_{0};
 
   std::atomic<size_t> pending_;
 

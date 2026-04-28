@@ -26,6 +26,7 @@ class ArcherPrefetchHandle {
 
   void ReplaceCacheCandidates(const std::vector<std::uint32_t>& tensor_ids);
   void EnqueuePrefetch(const uint32_t tensor_id, int gpu_id);
+  void SetCandidateDemandEvictionProtection(bool enabled);
   std::vector<std::uint64_t> GetPrefetchLifecycleStats() const;
   void ResetPrefetchLifecycleStats();
 

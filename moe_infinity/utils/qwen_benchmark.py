@@ -63,6 +63,7 @@ def build_qwen_benchmark_config(
     prefetch_credit_zero_action: str = "update_only",
     prefetch_policy_disabled: bool = False,
     prefetch_execution_mode: str = "replace_and_enqueue",
+    prefetch_retention_protect_demand_eviction: bool = False,
     static_prefetch_plan_path: str = "",
     static_prefetch_default_topk: int = 8,
     historical_reuse_match_topk: int = 4,
@@ -216,6 +217,9 @@ def build_qwen_benchmark_config(
         "prefetch_credit_zero_action": str(prefetch_credit_zero_action),
         "prefetch_policy_disabled": bool(prefetch_policy_disabled),
         "prefetch_execution_mode": str(prefetch_execution_mode),
+        "prefetch_retention_protect_demand_eviction": bool(
+            prefetch_retention_protect_demand_eviction
+        ),
         "static_prefetch_plan_path": str(static_prefetch_plan_path),
         "static_prefetch_default_topk": int(static_prefetch_default_topk),
         "local_continuation_library_capacity": int(
@@ -501,6 +505,30 @@ def aggregate_request_records(
         )
         for record in request_records
     ]
+    demand_candidate_protect_skip_counts = [
+        int(
+            record.get("dispatcher_stats", {}).get(
+                "demand_candidate_protect_skip_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    demand_candidate_protect_fallback_counts = [
+        int(
+            record.get("dispatcher_stats", {}).get(
+                "demand_candidate_protect_fallback_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    candidate_resident_hit_counts = [
+        int(record.get("dispatcher_stats", {}).get("candidate_resident_hit_count", 0))
+        for record in request_records
+    ]
+    candidate_demand_miss_counts = [
+        int(record.get("dispatcher_stats", {}).get("candidate_demand_miss_count", 0))
+        for record in request_records
+    ]
     prefetch_candidate_counts = [
         int(record.get("prefetcher_stats", {}).get("prefetch_candidate_count", 0))
         for record in request_records
@@ -704,6 +732,18 @@ def aggregate_request_records(
         "dispatcher_late_prefetch_demand_miss_count_total": int(
             sum(late_prefetch_demand_miss_counts)
         ),
+        "dispatcher_demand_candidate_protect_skip_count_total": int(
+            sum(demand_candidate_protect_skip_counts)
+        ),
+        "dispatcher_demand_candidate_protect_fallback_count_total": int(
+            sum(demand_candidate_protect_fallback_counts)
+        ),
+        "dispatcher_candidate_resident_hit_count_total": int(
+            sum(candidate_resident_hit_counts)
+        ),
+        "dispatcher_candidate_demand_miss_count_total": int(
+            sum(candidate_demand_miss_counts)
+        ),
         "prefetch_candidate_count_total": prefetch_candidate_count_total,
         "prefetch_admitted_count_total": prefetch_admitted_count_total,
         "prefetch_enqueue_count_total": int(sum(prefetch_enqueue_counts)),
@@ -825,6 +865,26 @@ def aggregate_request_records(
             if request_count
             else 0.0
         ),
+        "mean_dispatcher_demand_candidate_protect_skip_count": (
+            float(sum(demand_candidate_protect_skip_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_demand_candidate_protect_fallback_count": (
+            float(sum(demand_candidate_protect_fallback_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_candidate_resident_hit_count": (
+            float(sum(candidate_resident_hit_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_candidate_demand_miss_count": (
+            float(sum(candidate_demand_miss_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
         "library_query_count_total": int(sum(library_query_deltas)),
         "library_hit_count_total": int(sum(library_hit_deltas)),
         "library_admit_count_total": int(sum(library_admit_deltas)),
@@ -913,15 +973,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | runtime enqueue | queue push | same-device skip | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | runtime enqueue | queue push | same-device skip | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | candidate hit | candidate miss | protect skip | protect fallback | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {runtime_enqueue} | {runtime_queue_push} | {runtime_same_device_skip} | {runtime_dequeue} | {runtime_complete} | {runtime_queue_cleared} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {runtime_enqueue} | {runtime_queue_push} | {runtime_same_device_skip} | {runtime_dequeue} | {runtime_complete} | {runtime_queue_cleared} | {resident_hit} | {late_miss} | {candidate_hit} | {candidate_miss} | {protect_skip} | {protect_fallback} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -987,6 +1047,22 @@ def render_markdown_summary(
                         "dispatcher_late_prefetch_demand_miss_count_total",
                         0,
                     ),
+                    candidate_hit=agg.get(
+                        "dispatcher_candidate_resident_hit_count_total",
+                        0,
+                    ),
+                    candidate_miss=agg.get(
+                        "dispatcher_candidate_demand_miss_count_total",
+                        0,
+                    ),
+                    protect_skip=agg.get(
+                        "dispatcher_demand_candidate_protect_skip_count_total",
+                        0,
+                    ),
+                    protect_fallback=agg.get(
+                        "dispatcher_demand_candidate_protect_fallback_count_total",
+                        0,
+                    ),
                     admit_rate=agg.get("prefetch_admit_rate", 0.0),
                     pressure_drop_rate=agg.get("prefetch_pressure_drop_rate", 0.0),
                     under_pressure=agg.get(
@@ -1041,6 +1117,8 @@ def prepare_case_paths(
     output_root: str | Path,
     trace_name: str,
     variant: str,
+    offload_cache_template: str | Path = "",
+    offload_cache_mode: str = "fresh",
 ) -> Dict[str, str]:
     output_root = Path(output_root)
     raw_dir = output_root / "raw"
@@ -1048,10 +1126,28 @@ def prepare_case_paths(
     events_dir = output_root / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     slug = f"{trace_name}__{variant}"
+    template = Path(offload_cache_template) if offload_cache_template else None
+    if template is not None:
+        if not (template / "archer_index").exists():
+            raise ValueError(f"offload cache template missing archer_index: {template}")
+        if offload_cache_mode != "shared":
+            raise ValueError(
+                f"Unsupported offload_cache_mode={offload_cache_mode!r}; "
+                "currently only 'fresh' and 'shared' are supported"
+            )
+        offload_path = str(template)
+    else:
+        if offload_cache_mode != "fresh":
+            raise ValueError(
+                "offload_cache_mode requires --offload-cache-template unless mode is fresh"
+            )
+        offload_path = make_fresh_offload_path(
+            str(output_root / "offload"), phase=slug
+        )
     return {
         "raw_json": str(raw_dir / f"{slug}.json"),
         "phasea_events_jsonl": str(events_dir / f"{slug}.jsonl"),
-        "offload_path": make_fresh_offload_path(
-            str(output_root / "offload"), phase=slug
-        ),
+        "offload_path": offload_path,
+        "offload_cache_template": str(template) if template is not None else "",
+        "offload_cache_mode": offload_cache_mode,
     }

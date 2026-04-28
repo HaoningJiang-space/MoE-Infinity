@@ -30,6 +30,7 @@ class ExpertPrefetcher(object):
         self.prefetch_credit_zero_action = "update_only"
         self.prefetch_policy_disabled = False
         self.prefetch_execution_mode = "replace_and_enqueue"
+        self.prefetch_retention_protect_demand_eviction = False
         self.reset_prefetch_runtime_stats()
 
     def set_archer_engine(self, archer_engine):

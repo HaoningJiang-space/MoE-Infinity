@@ -166,6 +166,10 @@ def test_percentile_and_aggregate_metrics():
                 "no_victim_wait_max_us": 0,
                 "prefetch_resident_hit_count": 2,
                 "late_prefetch_demand_miss_count": 1,
+                "demand_candidate_protect_skip_count": 5,
+                "demand_candidate_protect_fallback_count": 1,
+                "candidate_resident_hit_count": 7,
+                "candidate_demand_miss_count": 2,
             },
             "library_stats_delta": {
                 "query_count": 2,
@@ -220,6 +224,10 @@ def test_percentile_and_aggregate_metrics():
                 "no_victim_wait_max_us": 60,
                 "prefetch_resident_hit_count": 3,
                 "late_prefetch_demand_miss_count": 4,
+                "demand_candidate_protect_skip_count": 9,
+                "demand_candidate_protect_fallback_count": 2,
+                "candidate_resident_hit_count": 11,
+                "candidate_demand_miss_count": 3,
             },
             "library_stats_delta": {
                 "query_count": 4,
@@ -301,6 +309,10 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["prefetch_runtime_queue_cleared_task_count_total"] == 8
     assert aggregate["dispatcher_prefetch_resident_hit_count_total"] == 5
     assert aggregate["dispatcher_late_prefetch_demand_miss_count_total"] == 5
+    assert aggregate["dispatcher_demand_candidate_protect_skip_count_total"] == 14
+    assert aggregate["dispatcher_demand_candidate_protect_fallback_count_total"] == 3
+    assert aggregate["dispatcher_candidate_resident_hit_count_total"] == 18
+    assert aggregate["dispatcher_candidate_demand_miss_count_total"] == 5
     assert aggregate["cache_prefetch_count_total"] == 3
 
 
@@ -326,6 +338,39 @@ def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():
     assert lifecycle["pending_stall_count"] == 0
     assert lifecycle["prefetch_resident_hit_count"] == 11
     assert lifecycle["late_prefetch_demand_miss_count"] == 12
+
+    candidate_lifecycle = dispatcher_stats_dict(
+        [
+            10,
+            1,
+            20,
+            30,
+            7,
+            3,
+            2,
+            1,
+            1,
+            50,
+            50,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            0,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+        ]
+    )
+    assert candidate_lifecycle["demand_candidate_protect_skip_count"] == 13
+    assert candidate_lifecycle["demand_candidate_protect_fallback_count"] == 14
+    assert candidate_lifecycle["candidate_resident_hit_count"] == 15
+    assert candidate_lifecycle["candidate_demand_miss_count"] == 16
 
 
 def test_summarize_hit_rate_tensor():
