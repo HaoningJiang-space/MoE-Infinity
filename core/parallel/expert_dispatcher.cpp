@@ -21,6 +21,7 @@
 #include <future>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
@@ -30,6 +31,20 @@ void RecordAtomicMax(std::atomic<std::uint64_t>& target,
   auto current = target.load();
   while (value > current && !target.compare_exchange_weak(current, value)) {
   }
+}
+
+std::chrono::milliseconds PendingStallTimeout() {
+  const char* timeout_ms = std::getenv("MOE_INFINITY_PENDING_STALL_TIMEOUT_MS");
+  if (timeout_ms == nullptr || timeout_ms[0] == '\0') {
+    return std::chrono::seconds(300);
+  }
+
+  char* end = nullptr;
+  long long parsed = std::strtoll(timeout_ms, &end, 10);
+  if (end == timeout_ms || parsed <= 0) {
+    return std::chrono::seconds(300);
+  }
+  return std::chrono::milliseconds(parsed);
 }
 }  // namespace
 
@@ -754,15 +769,17 @@ void ExpertDispatcher::WaitForPendingZero(const char* caller) {
 
   constexpr auto kPollInterval = std::chrono::milliseconds(1000);
   constexpr auto kLogInterval = std::chrono::seconds(30);
-  constexpr auto kStallTimeout = std::chrono::seconds(300);
+  const auto kStallTimeout = PendingStallTimeout();
 
   auto wait_start = std::chrono::steady_clock::now();
   auto last_log = wait_start;
   auto last_progress = wait_start;
   auto progress_signature = [&]() -> std::uint64_t {
+    // A no-victim retry proves the fetch thread is alive, but it does not
+    // retire a pending expert. Treat only actual queue/eviction/output movement
+    // as forward progress for the pending-stall guard.
     return fetch_dequeue_count_.load() + exec_dequeue_count_.load() +
-           output_count_.load() + eviction_count_.load() +
-           no_victim_wait_count_.load();
+           output_count_.load() + eviction_count_.load();
   };
   std::uint64_t last_signature = progress_signature();
 

@@ -127,11 +127,14 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         "--phasea-analysis-max-ranked-candidates",
         "128",
     ]
-    env = {
-        "PATH": "/home/ziheng/miniconda3/envs/mxmoe/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin",
-        "PYTHONPATH": str(REPO),
-        "CUDA_VISIBLE_DEVICES": CUDA_VISIBLE_DEVICES,
-    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": "/home/ziheng/miniconda3/envs/mxmoe/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin",
+            "PYTHONPATH": str(REPO),
+            "CUDA_VISIBLE_DEVICES": CUDA_VISIBLE_DEVICES,
+        }
+    )
     with log_path.open("w", encoding="utf-8") as log_file:
         result = subprocess.run(
             cmd,
@@ -171,7 +174,7 @@ def main() -> None:
             str(ROOT),
         ],
         cwd=REPO,
-        env={"PYTHONPATH": str(REPO)},
+        env={**os.environ, "PYTHONPATH": str(REPO)},
         check=False,
     )
     _append(ROOT / "driver.log", f"[{_now()}] canary analysis complete")
