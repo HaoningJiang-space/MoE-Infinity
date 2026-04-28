@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 
 
-ROOT = Path("/data/ziheng/moe_infinity_fgo_runs/phasea_v11_gpu0_pressure_canary")
+ROOT = Path(
+    os.environ.get(
+        "PRESSURE_CANARY_ROOT",
+        "/data/ziheng/moe_infinity_fgo_runs/phasea_v11_gpu0_pressure_canary",
+    )
+)
 REPO = Path("/data/ziheng/projects/moe_infinity_fgo")
 PYTHON = Path("/home/ziheng/miniconda3/envs/mxmoe/bin/python")
 MODEL = Path("/data/ziheng/models/Qwen1.5-MoE-A2.7B-Chat")
 TRACE_DIR = REPO / "benchmarks/traces/qwen"
+CUDA_VISIBLE_DEVICES = os.environ.get("PRESSURE_CANARY_CUDA_VISIBLE_DEVICES", "0")
 TRACE_NAME = "mixed"
 CASES = [
     ("conservative", 2, 16, "on_demand"),
@@ -103,7 +110,7 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
     env = {
         "PATH": "/home/ziheng/miniconda3/envs/mxmoe/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin",
         "PYTHONPATH": str(REPO),
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": CUDA_VISIBLE_DEVICES,
     }
     with log_path.open("w", encoding="utf-8") as log_file:
         result = subprocess.run(
