@@ -73,6 +73,8 @@ class ArcherTaskPool : public base::noncopyable {
         prefetch_candidate_set_cleared_count_.load(),
         prefetch_queue_cleared_task_count_.load(),
         prefetch_enqueue_count_.load(),
+        prefetch_queue_push_count_.load(),
+        prefetch_same_device_skip_count_.load(),
         prefetch_dequeue_count_.load(),
         prefetch_complete_count_.load(),
         prefetch_trylock_failed_count_.load(),
@@ -86,6 +88,8 @@ class ArcherTaskPool : public base::noncopyable {
     prefetch_candidate_set_cleared_count_.store(0);
     prefetch_queue_cleared_task_count_.store(0);
     prefetch_enqueue_count_.store(0);
+    prefetch_queue_push_count_.store(0);
+    prefetch_same_device_skip_count_.store(0);
     prefetch_dequeue_count_.store(0);
     prefetch_complete_count_.store(0);
     prefetch_trylock_failed_count_.store(0);
@@ -166,6 +170,8 @@ class ArcherTaskPool : public base::noncopyable {
   std::atomic<std::uint64_t> prefetch_candidate_set_cleared_count_{0};
   std::atomic<std::uint64_t> prefetch_queue_cleared_task_count_{0};
   std::atomic<std::uint64_t> prefetch_enqueue_count_{0};
+  std::atomic<std::uint64_t> prefetch_queue_push_count_{0};
+  std::atomic<std::uint64_t> prefetch_same_device_skip_count_{0};
   std::atomic<std::uint64_t> prefetch_dequeue_count_{0};
   std::atomic<std::uint64_t> prefetch_complete_count_{0};
   std::atomic<std::uint64_t> prefetch_trylock_failed_count_{0};

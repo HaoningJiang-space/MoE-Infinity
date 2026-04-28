@@ -227,19 +227,23 @@ def _render_summary(results: Dict[str, Any]) -> str:
         "",
         "Purpose: separate no-sync prefetch data-plane behavior from synchronous local-continuation trace capture.",
         "",
-        "| case | rc | failed | tok/s | ms/token | runtime enqueue | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | miss | evict | stall |",
-        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| case | rc | failed | tok/s | ms/token | runtime enqueue | queue push | same-device skip | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | miss | evict | stall |",
+        "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, result in results.items():
         agg = result.get("aggregate", {})
         lines.append(
-            "| {name} | {rc} | {failed} | {tps:.3f} | {mpt:.2f} | {rt_enq} | {rt_deq} | {rt_comp} | {cleared} | {resident} | {late} | {miss} | {evict} | {stall} |".format(
+            "| {name} | {rc} | {failed} | {tps:.3f} | {mpt:.2f} | {rt_enq} | {rt_push} | {same_dev} | {rt_deq} | {rt_comp} | {cleared} | {resident} | {late} | {miss} | {evict} | {stall} |".format(
                 name=name,
                 rc=result.get("returncode", ""),
                 failed=str(bool(result.get("failed", False))).lower(),
                 tps=float(agg.get("generated_tokens_per_second", 0.0)),
                 mpt=float(agg.get("latency_per_generated_token_mean_ms", 0.0)),
                 rt_enq=agg.get("prefetch_runtime_enqueue_count_total", 0),
+                rt_push=agg.get("prefetch_runtime_queue_push_count_total", 0),
+                same_dev=agg.get(
+                    "prefetch_runtime_same_device_skip_count_total", 0
+                ),
                 rt_deq=agg.get("prefetch_runtime_dequeue_count_total", 0),
                 rt_comp=agg.get("prefetch_runtime_complete_count_total", 0),
                 cleared=agg.get("prefetch_runtime_queue_cleared_task_count_total", 0),
@@ -256,6 +260,7 @@ def _render_summary(results: Dict[str, Any]) -> str:
             "Interpretation rule:",
             "",
             "- If static cases complete and show runtime complete/resident-hit counters, the prefetch data path is alive without sync trace capture.",
+            "- If static cases enqueue but queue-push/dequeue/complete stay near zero, they are retention/candidate-set effects, not real H2D prefetch hits.",
             "- If static cases stay near on-demand but local_sync_cap8 remains slow, the bottleneck is the synchronous policy/control path.",
             "- If static cases enqueue but have high queue-cleared or late-miss counts, the lifecycle/cancellation semantics are the next target.",
             "",

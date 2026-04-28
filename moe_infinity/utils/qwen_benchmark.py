@@ -598,6 +598,8 @@ def aggregate_request_records(
         "prefetch_runtime_candidate_set_cleared_count",
         "prefetch_runtime_queue_cleared_task_count",
         "prefetch_runtime_enqueue_count",
+        "prefetch_runtime_queue_push_count",
+        "prefetch_runtime_same_device_skip_count",
         "prefetch_runtime_dequeue_count",
         "prefetch_runtime_complete_count",
         "prefetch_runtime_trylock_failed_count",
@@ -909,15 +911,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | runtime enqueue | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | runtime enqueue | queue push | same-device skip | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {runtime_enqueue} | {runtime_dequeue} | {runtime_complete} | {runtime_queue_cleared} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {runtime_enqueue} | {runtime_queue_push} | {runtime_same_device_skip} | {runtime_dequeue} | {runtime_complete} | {runtime_queue_cleared} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -953,6 +955,14 @@ def render_markdown_summary(
                     ),
                     runtime_enqueue=agg.get(
                         "prefetch_runtime_enqueue_count_total",
+                        0,
+                    ),
+                    runtime_queue_push=agg.get(
+                        "prefetch_runtime_queue_push_count_total",
+                        0,
+                    ),
+                    runtime_same_device_skip=agg.get(
+                        "prefetch_runtime_same_device_skip_count_total",
                         0,
                     ),
                     runtime_dequeue=agg.get(

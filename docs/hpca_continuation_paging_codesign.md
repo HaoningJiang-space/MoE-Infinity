@@ -379,6 +379,41 @@ v24 之后，下一步实验不应该继续泛泛调 cap，而应该先验证两
 - **prefetch lifecycle 是否健康**：issued / dequeued / completed / canceled / used / late 各是多少。
 - **无同步 trace capture 的 prefetch 是否还能工作**：用 static/no-sync prefetch baseline 检查数据面是否比 `local_sync_cap8` 更接近 on-demand。
 
+v26 已经给出第一版答案：
+
+- root: `/data/ziheng/moe_infinity_fgo_runs/phasea_v26_static_prefetch_sanity`
+- trace/pressure: `mixed`, `ratio=0.30`, fixed 16 new tokens
+- `on_demand`: `8.636 tok/s`, miss `3032`, eviction `1309`
+- `prefetch_enabled_no_policy`: `9.259 tok/s`, miss `3074`, eviction `1339`
+- `static_hot_top4`: `9.071 tok/s`, miss `1480`, eviction `620`
+- `static_hot_top8`: `8.977 tok/s`, miss `1875`, eviction `821`
+- `local_sync_cap8`: `1.866 tok/s`, miss `4663`, eviction `1883`
+
+v26 最关键的 lifecycle 结果：
+
+- `static_hot_top4/top8` 都有约 `46K-47K` 次 Python/C++ enqueue 调用。
+- 但它们的 runtime dequeue / complete / resident-hit / cache-prefetch 都是 `0`。
+- `local_sync_cap8` 有 `47075` 次 enqueue、`1132` 次 runtime dequeue/complete，但 resident-hit 仍是 `0`。
+
+这说明当前必须把三个概念分开：
+
+1. **candidate-set retention**：`replace_cache_candidates()` 会保护 candidate set，使这些 expert 不容易被 demand eviction 踢掉。
+2. **prefetch task admission**：Python/C++ 调用了 `enqueue_prefetch()`，但这不等于 task 真正进入 worker queue。
+3. **real H2D prefetch utility**：只有 runtime dequeue/complete 后又被 demand 命中，才算真正 useful prefetch。
+
+v26 的解释应非常克制：
+
+> static/no-sync cases 接近 on-demand，说明去掉同步 trace capture 后 control-plane tax 消失。
+> static cases 的 miss/evict 下降，主要像是 candidate-set retention / eviction side effect，而不是 prefetch worker 提前搬运后的命中。
+> local_sync_cap8 慢，说明同步 policy update/query 仍是主瓶颈；它完成的 prefetch 也没有形成 resident-hit。
+
+因此，下一步代码和实验要先修 counter 语义：
+
+- `prefetch_runtime_enqueue_count` 表示 API enqueue attempt。
+- 新增 `prefetch_runtime_queue_push_count`，表示真正放入 worker queue。
+- 新增 `prefetch_runtime_same_device_skip_count`，表示因为 source/destination 已相同而没有入队。
+- 后续图里不能把 enqueue attempt 当作 issued prefetch。
+
 ### 4. prefetch lifecycle 语义还没有完全证明
 
 代码路径还暴露了一个必须单独记录的问题：

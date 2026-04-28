@@ -89,6 +89,8 @@ class ExpertPrefetcher(object):
                 "prefetch_runtime_candidate_set_cleared_count",
                 "prefetch_runtime_queue_cleared_task_count",
                 "prefetch_runtime_enqueue_count",
+                "prefetch_runtime_queue_push_count",
+                "prefetch_runtime_same_device_skip_count",
                 "prefetch_runtime_dequeue_count",
                 "prefetch_runtime_complete_count",
                 "prefetch_runtime_trylock_failed_count",

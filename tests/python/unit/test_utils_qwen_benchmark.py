@@ -193,6 +193,8 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_plan_candidate_count": 8,
                 "prefetch_plan_cleared_candidate_count": 4,
                 "prefetch_runtime_enqueue_count": 8,
+                "prefetch_runtime_queue_push_count": 6,
+                "prefetch_runtime_same_device_skip_count": 2,
                 "prefetch_runtime_dequeue_count": 7,
                 "prefetch_runtime_complete_count": 6,
                 "prefetch_runtime_queue_cleared_task_count": 3,
@@ -248,6 +250,8 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_plan_candidate_count": 15,
                 "prefetch_plan_cleared_candidate_count": 8,
                 "prefetch_runtime_enqueue_count": 15,
+                "prefetch_runtime_queue_push_count": 11,
+                "prefetch_runtime_same_device_skip_count": 4,
                 "prefetch_runtime_dequeue_count": 12,
                 "prefetch_runtime_complete_count": 10,
                 "prefetch_runtime_queue_cleared_task_count": 5,
@@ -287,6 +291,8 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["prefetch_plan_candidate_count_total"] == 23
     assert aggregate["prefetch_plan_cleared_candidate_count_total"] == 12
     assert aggregate["prefetch_runtime_enqueue_count_total"] == 23
+    assert aggregate["prefetch_runtime_queue_push_count_total"] == 17
+    assert aggregate["prefetch_runtime_same_device_skip_count_total"] == 6
     assert aggregate["prefetch_runtime_dequeue_count_total"] == 19
     assert aggregate["prefetch_runtime_complete_count_total"] == 16
     assert aggregate["prefetch_runtime_queue_cleared_task_count_total"] == 8

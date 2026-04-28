@@ -193,6 +193,11 @@ Continuation Cache for MoE Expert Paging
   - v24 overhead decomposition 显示 `prefetch_enabled_no_policy` 和 `local_credit0_skip_policy` 都在约 `9.2-9.3 tok/s`，而 `sequence_credit0_update_only` 和 `local_credit0_update_only` 都只有约 `0.93 tok/s`。
   - 这说明当前最大性能问题不是 local continuation object 独有，而是同步 `policy.update_only` / expert trace capture 被放进 decode critical path。
   - 因此，下一步不能只继续调 cap；要证明 optional speculation 必须在源头被 credit-gated，且不能先同步生成再 drop。
+- v26 进一步确认了 prefetch 语义需要拆开:
+  - `static_hot_top4/top8` 接近 on-demand，说明无同步 trace capture 的路径没有 v24 那种 10x control-plane tax。
+  - 但 static cases 虽然有约 `46K-47K` 次 enqueue attempt，runtime dequeue/complete/resident-hit 都是 `0`；miss/evict 下降更像 candidate-set retention / eviction side effect，而不是 real H2D prefetch hit。
+  - `local_sync_cap8` 只有 `1.866 tok/s`，且虽然完成 `1132` 次 prefetch，resident-hit 仍是 `0`。
+  - 所以后续必须区分 candidate-set retention、prefetch task queueing、真正 H2D prefetch completion 和 demand hit，不能把它们都叫 prefetch 收益。
 
 这组结果对主线的影响：
 

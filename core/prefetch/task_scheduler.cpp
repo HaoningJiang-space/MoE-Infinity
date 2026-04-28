@@ -106,6 +106,9 @@ void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
   }
 
   if (task->src_device == task->dst_device) {
+    if (!task->on_demand && task->priority > 0) {
+      prefetch_same_device_skip_count_.fetch_add(1);
+    }
     task->node->state = 0;
     task->node->cv.notify_all();
     DLOG_TRACE("EnqueueTask: {} is on the same device", task->DebugString());
@@ -115,6 +118,9 @@ void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
   {
     std::lock_guard<std::mutex> lock(unified_mutex_);
     unified_queue_[task->priority].push_back(task);
+    if (!task->on_demand && task->priority > 0) {
+      prefetch_queue_push_count_.fetch_add(1);
+    }
   }
 
   DLOG_TRACE("EnqueueTask: finish {}", task->DebugString());
