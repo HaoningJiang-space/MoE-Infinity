@@ -180,11 +180,14 @@ Continuation Cache for MoE Expert Paging
   - v19：strict admission 把 speculative prefetch 全部 drop，同样 `ratio_030/local/aggressive` 完成；miss `5959`、evict `2621`，但 no-victim/all-locked/pending-stall 都是 `0`。
   - v20：bounded admission 每个 plan 放行少量 prefetch，admitted/enqueued `47104`、drop `302822`，同样完成；miss `8908`、evict `3389`，no-victim/all-locked/pending-stall 仍是 `0`。
   - 这说明 `ratio_030` 不是必然不可跑；问题来自 unbounded speculative expert traffic，bounded admission 可以恢复 demand progress。
-- v21 的目标是把 v20 的手工 cap 固化成正式机制:
+- v21 把 v20 的手工 cap 固化成正式机制:
   - 使用显式 `prefetch_admission_max_per_plan`，而不是 `locked_ratio_threshold=0.0` 的间接 hack。
   - 新增 `cap drop` 和 `pressure drop` counter，区分主动 bounded admission 与真正 pressure-triggered drop。
   - 新增 `admit_rate` 和 `pressure_drop_rate`，把 speculation 强度量化。
-  - 先跑 `no_admission/cap0/cap4/cap8/cap16/cap32` 小矩阵，找最大安全 speculation window，不把它包装成最终性能图。
+  - 已跑 `no_admission/cap0/cap4/cap8/cap16/cap32` 小矩阵，找最大安全 speculation window。
+  - 当前 `mixed/ratio030/aggressive` 下，`cap0/cap4/cap8` 完成，`no_admission/cap16/cap32` 触发 progress stall。
+  - 初步最大安全窗口是 `cap8`；`cap16` 已越过 progress boundary。
+  - 这批是双 GPU 并行 robustness sweep，不能直接包装成最终性能图；如果要比较 tok/s，需要对 `cap0/cap4/cap8` 做单独 sequential rerun。
 
 这组结果对主线的影响：
 

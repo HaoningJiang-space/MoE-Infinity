@@ -243,7 +243,7 @@ v20 还有一个限制：
 > 它用 `locked_ratio_threshold=0.0` 间接实现每个 plan 最多放行 4 个 candidate。
 > 这能证明 bounded speculation 有效，但机制表达不够干净。
 
-因此，下一步 v21 要把这个 hack 变成显式机制：
+v21 已经把这个 hack 变成显式机制：
 
 - `no_admission`: 不启用 admission，保留真正 unbounded speculation failure/control baseline。
 - `prefetch_admission_max_per_plan = -1`: 不启用 hard cap。
@@ -262,6 +262,25 @@ v21 的核心目标：
 - `all_locked_event` 低或为 0
 - `no_victim_wait` bounded
 - `tok/s` 不差于 `cap0`
+
+v21 cap sweep 结果：
+
+- roots: `/data/ziheng/moe_infinity_fgo_runs/phasea_v21_cap_sweep_*`
+- trace/variant: `mixed / history_reuse_local_backbone`
+- pressure: `device_memory_ratio=0.30`, `future_layers=4`, `max_candidates=32`
+- `no_admission`: failed, `admit_rate=1.0000`, `no_victim=714`, `all_locked=714`, `progress_stall=1`
+- `cap0`: complete, `admit_rate=0.0000`, `no_victim=0`, `all_locked=0`, `progress_stall=0`
+- `cap4`: complete, `admit_rate=0.1347`, `no_victim=0`, `all_locked=0`, `progress_stall=0`
+- `cap8`: complete, `admit_rate=0.2688`, `no_victim=0`, `all_locked=0`, `progress_stall=0`
+- `cap16`: failed, `admit_rate=0.5278`, `no_victim=654`, `all_locked=654`, `progress_stall=1`
+- `cap32`: failed, `admit_rate=1.0000`, `no_victim=735`, `all_locked=735`, `progress_stall=1`
+
+v21 的结论：
+
+> 当前配置下最大安全 speculation window 是 `cap8`；`cap16` 已经越过 progress boundary。
+> 这说明 per-plan cap 不是随便的 throttle，而是在寻找 bounded speculation 的安全窗口。
+
+注意：v21 使用双 GPU 并行跑 cap sweep，因此 tok/s 只能作为粗略参考；progress / stall / admission counters 才是这批结果的主证据。
 
 这正是 HPCA 切入口：
 
@@ -675,7 +694,7 @@ runtime 需要看到这些状态：
 - v18 targeted admission-v1：默认压力门控仍然太晚，local aggressive 继续触发 progress stall。
 - v19 strict admission：drop 全部 speculative prefetch 后，同样 pressure 下 demand progress 恢复。
 - v20 cap4 admission：每个 prefetch plan 放行少量 speculative experts，其余 drop；仍然完成，且 miss/evict 非零。
-- v21 planned cap sweep：用显式 `prefetch_admission_max_per_plan` 跑 no_admission/cap0/cap4/cap8/cap16/cap32，找最大安全 speculation window。
+- v21 cap sweep：用显式 `prefetch_admission_max_per_plan` 跑 no_admission/cap0/cap4/cap8/cap16/cap32；当前最大安全 speculation window 是 cap8。
 
 ### Stage 3：修 progress bug
 
