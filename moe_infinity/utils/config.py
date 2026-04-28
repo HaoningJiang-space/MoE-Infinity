@@ -194,6 +194,14 @@ class ArcherConfig:
         default=False,
         metadata={"help": "Disable Python expert-policy drive while keeping prefetch wiring enabled"},
     )
+    static_prefetch_plan_path: str = field(
+        default="",
+        metadata={"help": "Optional JSON layer->expert plan for static no-sync prefetch diagnostics"},
+    )
+    static_prefetch_default_topk: int = field(
+        default=8,
+        metadata={"help": "Fallback number of low-index experts per layer for static no-sync prefetch diagnostics"},
+    )
     phasea_analysis_future_layers: int = field(
         default=0,
         metadata={"help": "Analysis-only candidate future-layer window for Phase-A observation; 0 means unbounded"},

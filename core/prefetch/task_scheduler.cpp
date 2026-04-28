@@ -81,6 +81,9 @@ void ArcherTaskPool::FetchExec(const std::uint64_t& request_id,
 
 void ArcherTaskPool::EnqueueTask(const TaskPtr& task) {
   DLOG_TRACE("EnqueueTask: {}", task->DebugString());
+  if (!task->on_demand && task->priority > 0) {
+    prefetch_enqueue_count_.fetch_add(1);
+  }
 
   {
     std::lock_guard<std::mutex> lock(unified_mutex_);
@@ -491,6 +494,9 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
                          }),
           unified_queue_[i].end());
     }
+    if (!task->on_demand && task->priority > 0) {
+      prefetch_dequeue_count_.fetch_add(1);
+    }
 
     DLOG_TRACE(("Execute task " + task->DebugString()).c_str());
 
@@ -499,6 +505,7 @@ void ArcherTaskPool::GPUThreadFunc(int gpu_id, int thread_id) {
     if (!task->on_demand) {
       bool success = RemoveCachedSparseNode(node);
       if (!success) {
+        prefetch_evict_failed_count_.fetch_add(1);
         DLOG_TRACE("{} evict failed, move to CPU", task->DebugString());
         continue;
       }
@@ -519,6 +526,7 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
              node->str());
   if (!task->on_demand) {
     if (!node->mutex.try_lock()) {
+      prefetch_trylock_failed_count_.fetch_add(1);
       DLOG_TRACE("SetNodeDevice: task: {}, mutex locked", task->DebugString());
       return;
     }
@@ -550,6 +558,7 @@ void ArcherTaskPool::SetNodeDevice(const TaskPtr& task) {
   node->io_state = NODE_STATE_CACHED;
 
   if (task->priority > 0 && task->dst_device.is_cuda()) {
+    prefetch_complete_count_.fetch_add(1);
     auto node_body = kTopologyHandle->GetNodeBodyFromCorrID(node->corr_id);
     node_body->prefetch_cnt += 1;
     node->io_state =

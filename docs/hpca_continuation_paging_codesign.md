@@ -340,6 +340,45 @@ v23 的目标不是先证明最终速度，而是做 overhead decomposition：
 
 > speculation throttling must move upstream before candidate materialization.
 
+v24 已经把这个归因进一步钉住：
+
+- root: `/data/ziheng/moe_infinity_fgo_runs/phasea_v24_policy_overhead_decomposition`
+- trace/pressure: `mixed`, `ratio=0.30`, fixed 16 new tokens
+- `on_demand`: `6.130 tok/s`, `163.14 ms/token`
+- `prefetch_enabled_no_policy`: `9.341 tok/s`, `107.05 ms/token`
+- `local_credit0_skip_policy`: `9.244 tok/s`, `108.18 ms/token`
+- `sequence_credit0_update_only`: `0.930 tok/s`, `1075.83 ms/token`
+- `local_credit0_update_only`: `0.926 tok/s`, `1080.09 ms/token`
+- `cap8_credit_gated_generation`: `0.873 tok/s`, `1145.56 ms/token`
+
+v24 的关键含义不是“local continuation 太重”，而是：
+
+> 同步 `policy.update_only` / route capture 放在 decode critical path 上，本身就足以把吞吐从约 `9 tok/s` 打到约 `0.9 tok/s`。
+
+这个结论非常重要，因为它修正了前面对 cap8 的解释：
+
+- `cap0` / `cap8` 的差异不是最终机制收益，只是在一个很重的同步 control path 内部比较。
+- `local_credit0_update_only` 和 `sequence_credit0_update_only` 几乎一样慢，说明问题不是 local-continuation object 独有，而是同步 expert trace capture / update path。
+- `prefetch_enabled_no_policy` 和 `local_credit0_skip_policy` 都接近 `9 tok/s`，说明底层 prefetch wiring 本身不是主要慢点。
+- `cap8_credit_gated_generation` 更慢，说明“生成候选、更新历史、再限流”仍然违反 optional-work 原则。
+
+所以当前 HPCA 主张要再收紧一层：
+
+> MoE speculation 不仅要 progress-isolated，还要 control-plane-isolated。
+> optional prefetch work 不能在没有 credit 的情况下做同步 GPU->CPU route capture、candidate generation 和 ranking。
+
+换句话说，`Credit-Gated Transactional Expert Paging` 不能只是末端 admission cap。更正确的 contract 是：
+
+1. paging substrate 先发 credit。
+2. 没有 credit 时，predictor 不做同步 trace capture，也不生成 candidates。
+3. 有 credit 时，只 materialize credit 范围内的 schedulable speculation。
+4. prefetched expert 先进入可撤销 speculative state，不能直接污染 committed expert cache。
+
+v24 之后，下一步实验不应该继续泛泛调 cap，而应该先验证两个问题：
+
+- **prefetch lifecycle 是否健康**：issued / dequeued / completed / canceled / used / late 各是多少。
+- **无同步 trace capture 的 prefetch 是否还能工作**：用 static/no-sync prefetch baseline 检查数据面是否比 `local_sync_cap8` 更接近 on-demand。
+
 ### 4. prefetch lifecycle 语义还没有完全证明
 
 代码路径还暴露了一个必须单独记录的问题：
@@ -385,20 +424,28 @@ drive_expert_policy
 - plan cleared: replacement 之前还有多少 plan candidates 被覆盖。
 - completed prefetch: runtime hit-rate tensor 里完成过的 prefetch 次数，是 prefetch lifecycle 的低成本下界信号。
 
-当前还缺的更强 lifecycle counter：
+v25 开始补更强的 lifecycle counter：
 
-- prefetch issued
-- prefetch completed
-- prefetch canceled by replacement
-- prefetch used before deadline
-- prefetch late
-- prefetch unused / expired
+- runtime prefetch enqueue / dequeue / complete
+- replacement 清掉的 queued prefetch task
+- candidate set replacement 前被覆盖的 candidate 数
+- demand 命中已经 resident 的 prefetched expert
+- demand miss 时同一个 expert 是否还在 pending prefetch 队列里，也就是 late prefetch signal
+- try-lock / eviction failure on prefetch task
 
-在这些 counter 补齐之前，论文里不能过度声称：
+仍然不能过度声称：
 
 > cap8 的收益来自 useful prefetch。
 
-更稳的说法是：
+因为 `prefetch unused / expired` 和真正的 deadline hit 还没有完整状态机；但 v25 已经足够回答更基础的问题：
+
+- prefetch task 是否真的进入底层 runtime。
+- 它们是否被 plan replacement 清掉。
+- 它们是否完成。
+- demand 是否真的撞上了 prefetched resident。
+- 需求到达时 prefetch 是否还没来得及完成。
+
+更稳的论文说法是：
 
 > cap8 恢复了 progress，并在当前实现下给出有限性能收益；下一步要分离 control-plane tax、plan cancellation 和 true prefetch utility。
 

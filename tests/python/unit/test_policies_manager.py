@@ -106,3 +106,18 @@ def test_static_frequency_policy_uses_existing_history():
     assert matrix.shape == (3, 4)
     assert np.count_nonzero(matrix) > 0
 
+
+def test_static_hot_policy_does_not_update_trace():
+    manager, tracer = _make_manager(policy="static_hot_prefetch")
+    seq_id = tracer.create_entry()
+
+    matrix = manager.update_and_score(
+        seq_id,
+        np.array([[2, 3], [3, 0]]),
+        layer_idx=1,
+    )
+
+    assert matrix is not None
+    assert matrix.shape == (3, 4)
+    assert np.count_nonzero(matrix) > 0
+    assert np.count_nonzero(tracer.trace[seq_id].matrix) == 0

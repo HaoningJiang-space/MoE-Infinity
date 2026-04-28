@@ -5,12 +5,15 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <list>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "base/noncopyable.h"
@@ -51,6 +54,43 @@ class ArcherTaskPool : public base::noncopyable {
   void FetchExec(const std::uint64_t& request_id, const NodePtr& node);
   void StopExec(const std::uint64_t& request_id, const NodePtr& node);
   void EnqueueTask(const TaskPtr& task);
+  bool HasPendingPrefetch(const NodePtr& node) {
+    std::lock_guard<std::mutex> lock(unified_mutex_);
+    for (std::uint32_t priority = 1; priority < NUM_PRIORITY; priority++) {
+      for (auto& task : unified_queue_[priority]) {
+        if (task != nullptr && task->node == node) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  std::vector<std::uint64_t> GetPrefetchLifecycleStats() const {
+    return {
+        prefetch_plan_replace_count_.load(),
+        prefetch_plan_empty_replace_count_.load(),
+        prefetch_plan_candidate_count_.load(),
+        prefetch_candidate_set_cleared_count_.load(),
+        prefetch_queue_cleared_task_count_.load(),
+        prefetch_enqueue_count_.load(),
+        prefetch_dequeue_count_.load(),
+        prefetch_complete_count_.load(),
+        prefetch_trylock_failed_count_.load(),
+        prefetch_evict_failed_count_.load(),
+    };
+  }
+  void ResetPrefetchLifecycleStats() {
+    prefetch_plan_replace_count_.store(0);
+    prefetch_plan_empty_replace_count_.store(0);
+    prefetch_plan_candidate_count_.store(0);
+    prefetch_candidate_set_cleared_count_.store(0);
+    prefetch_queue_cleared_task_count_.store(0);
+    prefetch_enqueue_count_.store(0);
+    prefetch_dequeue_count_.store(0);
+    prefetch_complete_count_.store(0);
+    prefetch_trylock_failed_count_.store(0);
+    prefetch_evict_failed_count_.store(0);
+  }
 
   void ClearQueue() {
     std::lock_guard<std::mutex> lock(unified_mutex_);
@@ -65,8 +105,14 @@ class ArcherTaskPool : public base::noncopyable {
 
   void ReplaceCacheCandidates(const NodePtrList& candidates) {
     std::lock_guard<std::mutex> lock(unified_mutex_);
+    prefetch_plan_replace_count_.fetch_add(1);
+    prefetch_plan_candidate_count_.fetch_add(candidates.size());
+    if (candidates.empty()) {
+      prefetch_plan_empty_replace_count_.fetch_add(1);
+    }
     {
       std::lock_guard<std::mutex> lock(this->candidates_mutex_);
+      prefetch_candidate_set_cleared_count_.fetch_add(candidates_.size());
       candidates_.clear();
       for (auto& node : candidates) {
         candidates_.insert(node);
@@ -74,6 +120,7 @@ class ArcherTaskPool : public base::noncopyable {
     }
 
     for (std::uint32_t priority = 1; priority < NUM_PRIORITY; priority++) {
+      prefetch_queue_cleared_task_count_.fetch_add(unified_queue_[priority].size());
       unified_queue_[priority].clear();
     }
   }
@@ -113,6 +160,16 @@ class ArcherTaskPool : public base::noncopyable {
   std::unordered_set<NodePtr> candidates_;
 
   std::atomic<bool> main_thread_stop_flag_;
+  std::atomic<std::uint64_t> prefetch_plan_replace_count_{0};
+  std::atomic<std::uint64_t> prefetch_plan_empty_replace_count_{0};
+  std::atomic<std::uint64_t> prefetch_plan_candidate_count_{0};
+  std::atomic<std::uint64_t> prefetch_candidate_set_cleared_count_{0};
+  std::atomic<std::uint64_t> prefetch_queue_cleared_task_count_{0};
+  std::atomic<std::uint64_t> prefetch_enqueue_count_{0};
+  std::atomic<std::uint64_t> prefetch_dequeue_count_{0};
+  std::atomic<std::uint64_t> prefetch_complete_count_{0};
+  std::atomic<std::uint64_t> prefetch_trylock_failed_count_{0};
+  std::atomic<std::uint64_t> prefetch_evict_failed_count_{0};
 };
 
 extern std::unique_ptr<ArcherTaskPool> kTaskPool;

@@ -274,6 +274,8 @@ std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
       pending_wait_total_us_.load(),
       pending_wait_max_us_.load(),
       pending_stall_count_.load(),
+      prefetch_resident_hit_count_.load(),
+      late_prefetch_demand_miss_count_.load(),
   };
 }
 
@@ -296,6 +298,8 @@ void ExpertDispatcher::ResetRuntimeStats() {
   pending_wait_total_us_.store(0);
   pending_wait_max_us_.store(0);
   pending_stall_count_.store(0);
+  prefetch_resident_hit_count_.store(0);
+  late_prefetch_demand_miss_count_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -403,8 +407,15 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     bool cache_hit = expert_node->node->device.is_cuda();
     if (cache_hit) {
       cache_hit_fetch_count_.fetch_add(1);
+      if ((expert_node->node->io_state & NODE_STATE_PREFETCHED) != 0) {
+        prefetch_resident_hit_count_.fetch_add(1);
+      }
     } else {
       cache_miss_fetch_count_.fetch_add(1);
+      if (kTaskPool != nullptr &&
+          kTaskPool->HasPendingPrefetch(expert_node->node)) {
+        late_prefetch_demand_miss_count_.fetch_add(1);
+      }
     }
 
     // std::cerr << "ExpertDispatcher::GPUFetchFunc: gpu_id " << gpu_id

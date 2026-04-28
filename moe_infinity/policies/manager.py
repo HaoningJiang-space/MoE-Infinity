@@ -13,6 +13,7 @@ from .base import BackboneSupport
 from .history_reuse import FineGrainedHistoryReusePolicy
 from .historical_library import HistoricalExpertLibrary
 from .local_continuation_library import LocalContinuationLibrary
+from .static_hot import StaticHotPrefetchPolicy
 from .static_frequency import StaticFrequencyPolicy
 from .trace_similarity import TraceSimilarityPolicy
 
@@ -69,6 +70,12 @@ class OffloadingPolicyManager:
                 model_tag=model_tag,
             ),
             "static_frequency": StaticFrequencyPolicy(
+                config=config,
+                tracer=tracer,
+                predictor=predictor,
+                model_tag=model_tag,
+            ),
+            "static_hot_prefetch": StaticHotPrefetchPolicy(
                 config=config,
                 tracer=tracer,
                 predictor=predictor,

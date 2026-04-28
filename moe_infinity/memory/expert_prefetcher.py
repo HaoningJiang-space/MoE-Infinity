@@ -61,11 +61,41 @@ class ExpertPrefetcher(object):
             "prefetch_plan_cleared_candidate_count": 0,
         }
         self._last_prefetch_plan_candidate_count = 0
+        archer_engine = getattr(self, "archer_engine", None)
+        if archer_engine is not None and hasattr(
+            archer_engine, "reset_prefetch_lifecycle_stats"
+        ):
+            try:
+                archer_engine.reset_prefetch_lifecycle_stats()
+            except Exception:
+                pass
 
     def prefetch_runtime_stats(self):
         stats = dict(self._prefetch_runtime_stats)
         if stats["pressure_evictable_min"] is None:
             stats["pressure_evictable_min"] = 0
+        archer_engine = getattr(self, "archer_engine", None)
+        if archer_engine is not None and hasattr(
+            archer_engine, "get_prefetch_lifecycle_stats"
+        ):
+            try:
+                values = list(archer_engine.get_prefetch_lifecycle_stats())
+            except Exception:
+                values = []
+            names = [
+                "prefetch_runtime_plan_replace_count",
+                "prefetch_runtime_plan_empty_replace_count",
+                "prefetch_runtime_plan_candidate_count",
+                "prefetch_runtime_candidate_set_cleared_count",
+                "prefetch_runtime_queue_cleared_task_count",
+                "prefetch_runtime_enqueue_count",
+                "prefetch_runtime_dequeue_count",
+                "prefetch_runtime_complete_count",
+                "prefetch_runtime_trylock_failed_count",
+                "prefetch_runtime_evict_failed_count",
+            ]
+            for index, name in enumerate(names):
+                stats[name] = int(values[index]) if index < len(values) else 0
         return stats
 
     def _pressure_snapshot(self, gpu_id):

@@ -224,6 +224,21 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   kTaskPool->EnqueueTask(task);
 }
 
+std::vector<std::uint64_t> ArcherPrefetchHandle::GetPrefetchLifecycleStats()
+    const {
+  if (kTaskPool == nullptr) {
+    return std::vector<std::uint64_t>(10, 0);
+  }
+  return kTaskPool->GetPrefetchLifecycleStats();
+}
+
+void ArcherPrefetchHandle::ResetPrefetchLifecycleStats() {
+  if (kTaskPool == nullptr) {
+    return;
+  }
+  kTaskPool->ResetPrefetchLifecycleStats();
+}
+
 std::vector<std::uint64_t> ArcherPrefetchHandle::GetSparsePressureSnapshot(
     int gpu_id) const {
   std::uint64_t cached_count = 0;

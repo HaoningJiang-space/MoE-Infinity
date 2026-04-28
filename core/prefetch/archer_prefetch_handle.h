@@ -26,6 +26,8 @@ class ArcherPrefetchHandle {
 
   void ReplaceCacheCandidates(const std::vector<std::uint32_t>& tensor_ids);
   void EnqueuePrefetch(const uint32_t tensor_id, int gpu_id);
+  std::vector<std::uint64_t> GetPrefetchLifecycleStats() const;
+  void ResetPrefetchLifecycleStats();
 
   void OffloadTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);
   void RegisterTensor(torch::Tensor& tensor, const std::uint32_t tensor_id);

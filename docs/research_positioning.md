@@ -188,12 +188,18 @@ Continuation Cache for MoE Expert Paging
   - 当前 `mixed/ratio030/aggressive` 下，`cap0/cap4/cap8` 完成，`no_admission/cap16/cap32` 触发 progress stall。
   - 初步最大安全窗口是 `cap8`；`cap16` 已越过 progress boundary。
   - 这批是双 GPU 并行 robustness sweep，不能直接包装成最终性能图；如果要比较 tok/s，需要对 `cap0/cap4/cap8` 做单独 sequential rerun。
+- v22/v24 改变了对“cap8 性能收益”的解释:
+  - v22 sequential rerun 显示 `cap8` 相对 `cap0` 只有约 8% 吞吐提升，说明 hard cap 可以恢复 progress，但不是最终机制。
+  - v24 overhead decomposition 显示 `prefetch_enabled_no_policy` 和 `local_credit0_skip_policy` 都在约 `9.2-9.3 tok/s`，而 `sequence_credit0_update_only` 和 `local_credit0_update_only` 都只有约 `0.93 tok/s`。
+  - 这说明当前最大性能问题不是 local continuation object 独有，而是同步 `policy.update_only` / expert trace capture 被放进 decode critical path。
+  - 因此，下一步不能只继续调 cap；要证明 optional speculation 必须在源头被 credit-gated，且不能先同步生成再 drop。
 
 这组结果对主线的影响：
 
 - continuation cache 仍然是 retrieval-object mismatch 的核心证据。
 - 但 HPCA 方向不应写成“local continuation 更会 prefetch”。
 - 更强的说法是：local continuation 让上层 hint 更局部、更激进，从而暴露了底层 expert paging contract 缺失；需要把 speculative expert traffic 降级成 best-effort / bounded traffic，保证 demand progress。
+- v24 后还要再加一句：speculative control-plane 也必须被隔离；没有 credit 时不应同步捕获 route trace、生成 candidates、排序再丢弃。
 
 ### 第二阶段：增强方向
 

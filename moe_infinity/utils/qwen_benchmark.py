@@ -21,6 +21,7 @@ from moe_infinity.utils.qwen_smoke import (
 
 QWEN_BENCHMARK_VARIANTS = (
     "on_demand",
+    "static_hot_prefetch",
     "trace_similarity_prefetch",
     "history_reuse_prefetch",
     "history_reuse_backbone",
@@ -61,6 +62,8 @@ def build_qwen_benchmark_config(
     prefetch_credit_count: int = -1,
     prefetch_credit_zero_action: str = "update_only",
     prefetch_policy_disabled: bool = False,
+    static_prefetch_plan_path: str = "",
+    static_prefetch_default_topk: int = 8,
     historical_reuse_match_topk: int = 4,
     historical_reuse_match_min_required: int = 2,
     historical_reuse_consensus_min_votes: int = 2,
@@ -91,6 +94,13 @@ def build_qwen_benchmark_config(
         prefetch_backbone_mode = "raw_topk"
         prefetch_future_layers = 0
         prefetch_max_candidates = 0
+        historical_reuse_candidate_mode = "top1"
+    elif variant == "static_hot_prefetch":
+        offloading_policy = "static_hot_prefetch"
+        prefetch = True
+        policy_score_only = False
+        prefetch_backbone_topk = 0
+        prefetch_backbone_mode = "raw_topk"
         historical_reuse_candidate_mode = "top1"
     elif variant == "trace_similarity_prefetch":
         offloading_policy = "baseline_trace_similarity"
@@ -204,6 +214,8 @@ def build_qwen_benchmark_config(
         "prefetch_credit_count": int(prefetch_credit_count),
         "prefetch_credit_zero_action": str(prefetch_credit_zero_action),
         "prefetch_policy_disabled": bool(prefetch_policy_disabled),
+        "static_prefetch_plan_path": str(static_prefetch_plan_path),
+        "static_prefetch_default_topk": int(static_prefetch_default_topk),
         "local_continuation_library_capacity": int(
             local_continuation_library_capacity
         ),
@@ -475,6 +487,18 @@ def aggregate_request_records(
         int(record.get("dispatcher_stats", {}).get("pending_stall_count", 0))
         for record in request_records
     ]
+    prefetch_resident_hit_counts = [
+        int(record.get("dispatcher_stats", {}).get("prefetch_resident_hit_count", 0))
+        for record in request_records
+    ]
+    late_prefetch_demand_miss_counts = [
+        int(
+            record.get("dispatcher_stats", {}).get(
+                "late_prefetch_demand_miss_count", 0
+            )
+        )
+        for record in request_records
+    ]
     prefetch_candidate_counts = [
         int(record.get("prefetcher_stats", {}).get("prefetch_candidate_count", 0))
         for record in request_records
@@ -567,6 +591,27 @@ def aggregate_request_records(
         )
         for record in request_records
     ]
+    prefetch_runtime_keys = (
+        "prefetch_runtime_plan_replace_count",
+        "prefetch_runtime_plan_empty_replace_count",
+        "prefetch_runtime_plan_candidate_count",
+        "prefetch_runtime_candidate_set_cleared_count",
+        "prefetch_runtime_queue_cleared_task_count",
+        "prefetch_runtime_enqueue_count",
+        "prefetch_runtime_dequeue_count",
+        "prefetch_runtime_complete_count",
+        "prefetch_runtime_trylock_failed_count",
+        "prefetch_runtime_evict_failed_count",
+    )
+    prefetch_runtime_totals = {
+        f"{key}_total": int(
+            sum(
+                int(record.get("prefetcher_stats", {}).get(key, 0))
+                for record in request_records
+            )
+        )
+        for key in prefetch_runtime_keys
+    }
     pressure_locked_max_values = [
         int(record.get("prefetcher_stats", {}).get("pressure_locked_max", 0))
         for record in request_records
@@ -649,6 +694,12 @@ def aggregate_request_records(
         "dispatcher_pending_wait_count_total": int(sum(pending_wait_counts)),
         "dispatcher_pending_wait_total_us": int(sum(pending_wait_total_us)),
         "dispatcher_pending_stall_count_total": int(sum(pending_stall_counts)),
+        "dispatcher_prefetch_resident_hit_count_total": int(
+            sum(prefetch_resident_hit_counts)
+        ),
+        "dispatcher_late_prefetch_demand_miss_count_total": int(
+            sum(late_prefetch_demand_miss_counts)
+        ),
         "prefetch_candidate_count_total": prefetch_candidate_count_total,
         "prefetch_admitted_count_total": prefetch_admitted_count_total,
         "prefetch_enqueue_count_total": int(sum(prefetch_enqueue_counts)),
@@ -685,6 +736,7 @@ def aggregate_request_records(
         "prefetch_plan_cleared_candidate_count_total": int(
             sum(prefetch_plan_cleared_candidate_counts)
         ),
+        **prefetch_runtime_totals,
         "prefetch_admit_rate": (
             float(prefetch_admitted_count_total / prefetch_candidate_count_total)
             if prefetch_candidate_count_total
@@ -756,6 +808,16 @@ def aggregate_request_records(
         ),
         "mean_dispatcher_pending_stall_count": (
             float(sum(pending_stall_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_prefetch_resident_hit_count": (
+            float(sum(prefetch_resident_hit_counts) / request_count)
+            if request_count
+            else 0.0
+        ),
+        "mean_dispatcher_late_prefetch_demand_miss_count": (
+            float(sum(late_prefetch_demand_miss_counts) / request_count)
             if request_count
             else 0.0
         ),
@@ -847,15 +909,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | completed prefetch | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | runtime enqueue | runtime dequeue | runtime complete | queue cleared | resident hit | late miss | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {completed_prefetch} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {runtime_enqueue} | {runtime_dequeue} | {runtime_complete} | {runtime_queue_cleared} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -889,7 +951,30 @@ def render_markdown_summary(
                         "prefetch_plan_empty_replace_count_total",
                         0,
                     ),
-                    completed_prefetch=agg.get("cache_prefetch_count_total", 0),
+                    runtime_enqueue=agg.get(
+                        "prefetch_runtime_enqueue_count_total",
+                        0,
+                    ),
+                    runtime_dequeue=agg.get(
+                        "prefetch_runtime_dequeue_count_total",
+                        0,
+                    ),
+                    runtime_complete=agg.get(
+                        "prefetch_runtime_complete_count_total",
+                        0,
+                    ),
+                    runtime_queue_cleared=agg.get(
+                        "prefetch_runtime_queue_cleared_task_count_total",
+                        0,
+                    ),
+                    resident_hit=agg.get(
+                        "dispatcher_prefetch_resident_hit_count_total",
+                        0,
+                    ),
+                    late_miss=agg.get(
+                        "dispatcher_late_prefetch_demand_miss_count_total",
+                        0,
+                    ),
                     admit_rate=agg.get("prefetch_admit_rate", 0.0),
                     pressure_drop_rate=agg.get("prefetch_pressure_drop_rate", 0.0),
                     under_pressure=agg.get(

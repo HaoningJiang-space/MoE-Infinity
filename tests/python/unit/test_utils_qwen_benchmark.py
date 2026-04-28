@@ -26,6 +26,20 @@ def test_build_qwen_benchmark_config_variants():
     assert on_demand["offloading_policy"] == "baseline_trace_similarity"
     assert on_demand["prefetch_backbone_topk"] == 0
 
+    static_hot = build_qwen_benchmark_config(
+        variant="static_hot_prefetch",
+        offload_path="/tmp/offload",
+        device_memory_ratio=0.6,
+        num_threads=1,
+        library_capacity=32,
+        library_metric="cosine",
+        library_admission="diversity_aware",
+        static_prefetch_default_topk=4,
+    )
+    assert static_hot["prefetch"] is True
+    assert static_hot["offloading_policy"] == "static_hot_prefetch"
+    assert static_hot["static_prefetch_default_topk"] == 4
+
     trace_prefetch = build_qwen_benchmark_config(
         variant="trace_similarity_prefetch",
         offload_path="/tmp/offload",
@@ -147,6 +161,8 @@ def test_percentile_and_aggregate_metrics():
                 "no_victim_wait_count": 0,
                 "no_victim_wait_total_us": 0,
                 "no_victim_wait_max_us": 0,
+                "prefetch_resident_hit_count": 2,
+                "late_prefetch_demand_miss_count": 1,
             },
             "library_stats_delta": {
                 "query_count": 2,
@@ -176,6 +192,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_plan_empty_replace_count": 1,
                 "prefetch_plan_candidate_count": 8,
                 "prefetch_plan_cleared_candidate_count": 4,
+                "prefetch_runtime_enqueue_count": 8,
+                "prefetch_runtime_dequeue_count": 7,
+                "prefetch_runtime_complete_count": 6,
+                "prefetch_runtime_queue_cleared_task_count": 3,
             },
         },
         {
@@ -193,6 +213,8 @@ def test_percentile_and_aggregate_metrics():
                 "no_victim_wait_count": 2,
                 "no_victim_wait_total_us": 80,
                 "no_victim_wait_max_us": 60,
+                "prefetch_resident_hit_count": 3,
+                "late_prefetch_demand_miss_count": 4,
             },
             "library_stats_delta": {
                 "query_count": 4,
@@ -225,6 +247,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_plan_empty_replace_count": 0,
                 "prefetch_plan_candidate_count": 15,
                 "prefetch_plan_cleared_candidate_count": 8,
+                "prefetch_runtime_enqueue_count": 15,
+                "prefetch_runtime_dequeue_count": 12,
+                "prefetch_runtime_complete_count": 10,
+                "prefetch_runtime_queue_cleared_task_count": 5,
             },
         },
     ]
@@ -260,6 +286,12 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["prefetch_plan_empty_replace_count_total"] == 1
     assert aggregate["prefetch_plan_candidate_count_total"] == 23
     assert aggregate["prefetch_plan_cleared_candidate_count_total"] == 12
+    assert aggregate["prefetch_runtime_enqueue_count_total"] == 23
+    assert aggregate["prefetch_runtime_dequeue_count_total"] == 19
+    assert aggregate["prefetch_runtime_complete_count_total"] == 16
+    assert aggregate["prefetch_runtime_queue_cleared_task_count_total"] == 8
+    assert aggregate["dispatcher_prefetch_resident_hit_count_total"] == 5
+    assert aggregate["dispatcher_late_prefetch_demand_miss_count_total"] == 5
     assert aggregate["cache_prefetch_count_total"] == 3
 
 
@@ -278,6 +310,13 @@ def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():
     assert extended["eviction_count"] == 2
     assert extended["all_locked_event_count"] == 1
     assert extended["no_victim_wait_total_us"] == 50
+
+    lifecycle = dispatcher_stats_dict(
+        [10, 1, 20, 30, 7, 3, 2, 1, 1, 50, 50, 4, 5, 6, 7, 8, 9, 0, 11, 12]
+    )
+    assert lifecycle["pending_stall_count"] == 0
+    assert lifecycle["prefetch_resident_hit_count"] == 11
+    assert lifecycle["late_prefetch_demand_miss_count"] == 12
 
 
 def test_summarize_hit_rate_tensor():

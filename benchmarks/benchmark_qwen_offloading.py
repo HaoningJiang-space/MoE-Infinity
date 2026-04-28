@@ -104,6 +104,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep prefetch wiring enabled but skip the Python expert-policy drive.",
     )
+    parser.add_argument(
+        "--static-prefetch-plan-path",
+        default="",
+        help="Optional JSON layer->expert plan for static no-sync prefetch diagnostics.",
+    )
+    parser.add_argument(
+        "--static-prefetch-default-topk",
+        type=int,
+        default=8,
+        help="Fallback number of low-index experts per layer for static no-sync prefetch diagnostics.",
+    )
     parser.add_argument("--historical-reuse-match-topk", type=int, default=4)
     parser.add_argument(
         "--historical-reuse-match-min-required", type=int, default=2
@@ -224,6 +235,8 @@ def _run_case(
     prefetch_credit_count: int,
     prefetch_credit_zero_action: str,
     prefetch_policy_disabled: bool,
+    static_prefetch_plan_path: str,
+    static_prefetch_default_topk: int,
     historical_reuse_match_topk: int,
     historical_reuse_match_min_required: int,
     historical_reuse_consensus_min_votes: int,
@@ -286,6 +299,8 @@ def _run_case(
         prefetch_credit_count=prefetch_credit_count,
         prefetch_credit_zero_action=prefetch_credit_zero_action,
         prefetch_policy_disabled=prefetch_policy_disabled,
+        static_prefetch_plan_path=static_prefetch_plan_path,
+        static_prefetch_default_topk=static_prefetch_default_topk,
         historical_reuse_match_topk=historical_reuse_match_topk,
         historical_reuse_match_min_required=historical_reuse_match_min_required,
         historical_reuse_consensus_min_votes=historical_reuse_consensus_min_votes,
@@ -579,6 +594,8 @@ def main() -> None:
                 prefetch_credit_count=args.prefetch_credit_count,
                 prefetch_credit_zero_action=args.prefetch_credit_zero_action,
                 prefetch_policy_disabled=args.prefetch_policy_disabled,
+                static_prefetch_plan_path=args.static_prefetch_plan_path,
+                static_prefetch_default_topk=args.static_prefetch_default_topk,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,
                 historical_reuse_match_min_required=args.historical_reuse_match_min_required,
                 historical_reuse_consensus_min_votes=args.historical_reuse_consensus_min_votes,
