@@ -146,6 +146,9 @@ def _case_summary(
 
 def build_summary(benchmark_root: Path) -> Dict[str, Any]:
     status_rows = _load_status(benchmark_root)
+    case_specs = list(status_rows.keys()) or [
+        (mode, variant) for mode in MODES for variant in VARIANTS
+    ]
     cases = [
         _case_summary(
             benchmark_root=benchmark_root,
@@ -153,8 +156,7 @@ def build_summary(benchmark_root: Path) -> Dict[str, Any]:
             variant=variant,
             status_rows=status_rows,
         )
-        for mode in MODES
-        for variant in VARIANTS
+        for mode, variant in case_specs
     ]
     return {
         "benchmark_root": str(benchmark_root),
