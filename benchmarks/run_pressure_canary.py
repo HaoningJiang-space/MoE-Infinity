@@ -35,6 +35,9 @@ PREFETCH_ADMISSION_LOCKED_RATIO_THRESHOLD = os.environ.get(
 PREFETCH_ADMISSION_MAX_UNDER_PRESSURE = os.environ.get(
     "PRESSURE_CANARY_PREFETCH_ADMISSION_MAX_UNDER_PRESSURE", "4"
 )
+PREFETCH_ADMISSION_MAX_PER_PLAN = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_ADMISSION_MAX_PER_PLAN", "-1"
+)
 DEFAULT_CASES = [
     ("conservative", 2, 16, "on_demand"),
     ("conservative", 2, 16, "history_reuse_consensus_backbone"),
@@ -121,6 +124,8 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         PREFETCH_ADMISSION_LOCKED_RATIO_THRESHOLD,
         "--prefetch-admission-max-under-pressure",
         PREFETCH_ADMISSION_MAX_UNDER_PRESSURE,
+        "--prefetch-admission-max-per-plan",
+        PREFETCH_ADMISSION_MAX_PER_PLAN,
         "--historical-reuse-match-topk",
         "4",
         "--historical-reuse-match-min-required",

@@ -24,6 +24,7 @@ class ExpertPrefetcher(object):
         self.prefetch_admission_demand_reserve = 2
         self.prefetch_admission_locked_ratio_threshold = 0.8
         self.prefetch_admission_max_under_pressure = 4
+        self.prefetch_admission_max_per_plan = -1
         self.reset_prefetch_runtime_stats()
 
     def set_archer_engine(self, archer_engine):
@@ -37,7 +38,10 @@ class ExpertPrefetcher(object):
             "prefetch_admitted_count": 0,
             "prefetch_enqueue_count": 0,
             "prefetch_drop_count": 0,
+            "prefetch_drop_cap_count": 0,
+            "prefetch_drop_pressure_count": 0,
             "prefetch_drop_no_evictable_count": 0,
+            "prefetch_under_pressure_count": 0,
             "demand_prefetch_conflict_count": 0,
             "pressure_sample_count": 0,
             "pressure_locked_max": 0,
@@ -100,6 +104,7 @@ class ExpertPrefetcher(object):
         max_under_pressure = max(
             int(getattr(self, "prefetch_admission_max_under_pressure", 4)), 0
         )
+        max_per_plan = int(getattr(self, "prefetch_admission_max_per_plan", -1))
 
         admitted = []
         admitted_by_gpu = {}
@@ -112,6 +117,10 @@ class ExpertPrefetcher(object):
                 self._record_pressure_snapshot(snapshots[gpu_id])
             snapshot = snapshots[gpu_id]
             if snapshot is None:
+                if max_per_plan >= 0 and admitted_by_gpu.get(gpu_id, 0) >= max_per_plan:
+                    stats["prefetch_drop_count"] += 1
+                    stats["prefetch_drop_cap_count"] += 1
+                    continue
                 admitted.append(tensor_id)
                 admitted_by_gpu[gpu_id] = admitted_by_gpu.get(gpu_id, 0) + 1
                 continue
@@ -120,13 +129,24 @@ class ExpertPrefetcher(object):
             locked = int(snapshot["locked"])
             evictable = int(snapshot["evictable"])
             locked_ratio = (locked / cached) if cached > 0 else 0.0
+            under_pressure = evictable <= demand_reserve or (
+                cached > 0 and locked_ratio >= locked_ratio_threshold
+            )
+            if under_pressure:
+                stats["prefetch_under_pressure_count"] += 1
 
             if evictable <= demand_reserve:
                 stats["prefetch_drop_count"] += 1
+                stats["prefetch_drop_pressure_count"] += 1
                 stats["prefetch_drop_no_evictable_count"] += 1
                 if gpu_id not in conflict_gpus:
                     stats["demand_prefetch_conflict_count"] += 1
                     conflict_gpus.add(gpu_id)
+                continue
+
+            if max_per_plan >= 0 and admitted_by_gpu.get(gpu_id, 0) >= max_per_plan:
+                stats["prefetch_drop_count"] += 1
+                stats["prefetch_drop_cap_count"] += 1
                 continue
 
             if (
@@ -135,6 +155,7 @@ class ExpertPrefetcher(object):
                 and admitted_by_gpu.get(gpu_id, 0) >= max_under_pressure
             ):
                 stats["prefetch_drop_count"] += 1
+                stats["prefetch_drop_pressure_count"] += 1
                 continue
 
             admitted.append(tensor_id)

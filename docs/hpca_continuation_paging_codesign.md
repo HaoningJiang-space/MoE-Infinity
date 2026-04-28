@@ -238,6 +238,31 @@ v20 的含义比 v19 更重要：
 > 只要把 speculative expert traffic 做 bounded admission，系统就能在强 pressure 下保住 demand progress。
 > 这支持 HPCA 主张：关键不是再调 predictor，而是给 speculative expert traffic 加 MoE-specific paging contract。
 
+v20 还有一个限制：
+
+> 它用 `locked_ratio_threshold=0.0` 间接实现每个 plan 最多放行 4 个 candidate。
+> 这能证明 bounded speculation 有效，但机制表达不够干净。
+
+因此，下一步 v21 要把这个 hack 变成显式机制：
+
+- `no_admission`: 不启用 admission，保留真正 unbounded speculation failure/control baseline。
+- `prefetch_admission_max_per_plan = -1`: 不启用 hard cap。
+- `prefetch_admission_max_per_plan = 0`: 全部 speculative prefetch drop。
+- `prefetch_admission_max_per_plan = 4/8/16/32`: 每个 policy step、每个 GPU 最多放行对应数量的 speculative expert。
+- summary 需要区分 `cap drop` 和 `pressure drop`，避免把“主动限流”和“已经无 victim 的压力 drop”混在一起。
+- derived metrics 需要记录 `admit_rate` 和 `pressure_drop_rate`，用于画 speculation intensity 与 progress boundary 的关系。
+
+v21 的核心目标：
+
+> Identify the largest safe speculation window under strong memory pressure.
+
+安全窗口定义为：
+
+- `progress_stall = 0`
+- `all_locked_event` 低或为 0
+- `no_victim_wait` bounded
+- `tok/s` 不差于 `cap0`
+
 这正是 HPCA 切入口：
 
 - 当前系统把 expert cache 当成普通软件缓存。
@@ -304,6 +329,7 @@ prefetch admission 不能只看预测分数、带宽、cache occupancy。
 - candidate layer deadline
 - prefetch 是否仍可取消
 - demand queue 是否已经积压
+- per-plan speculative traffic cap
 
 这比普通 prefetch throttling 更 MoE-specific，因为 expert 的 evictability 被执行锁和 layer-local deadline 共同决定。
 
@@ -649,6 +675,7 @@ runtime 需要看到这些状态：
 - v18 targeted admission-v1：默认压力门控仍然太晚，local aggressive 继续触发 progress stall。
 - v19 strict admission：drop 全部 speculative prefetch 后，同样 pressure 下 demand progress 恢复。
 - v20 cap4 admission：每个 prefetch plan 放行少量 speculative experts，其余 drop；仍然完成，且 miss/evict 非零。
+- v21 planned cap sweep：用显式 `prefetch_admission_max_per_plan` 跑 no_admission/cap0/cap4/cap8/cap16/cap32，找最大安全 speculation window。
 
 ### Stage 3：修 progress bug
 
@@ -664,6 +691,7 @@ runtime 需要看到这些状态：
 
 - 第 1/2/4 步已经有第一版实现，并在 v17 中证明能诊断 progress stall。
 - 第 3/5 步已经有第一版 admission + counter 实现：v19/v20 证明 drop / bounded admission 可以恢复 progress。
+- 新增显式 per-plan cap 后，v21 将不再依赖 `locked_ratio_threshold=0.0` 这种实验 hack。
 - 现在还不能把它说成最终硬件机制，只能说是 software proof-of-concept：prefetch 从 hard traffic 被降级成 best-effort / bounded speculative traffic。
 
 验收标准：
@@ -806,12 +834,14 @@ prefetch：
 - best-effort
 - drop/defer/throttle under pressure
 - 不占 demand reserve
+- 支持 per-plan hard cap，避免单个 policy step 注入过多 speculative expert traffic
 
 当前实现状态：
 
 - 已支持 drop / bounded admission。
 - 还没有真正 defer queue。
-- 当前 cap 通过 admission 参数实现，后续应改成更明确的 deadline/pressure policy。
+- v19/v20 的 cap 已经证明方向有效。
+- v21 的显式 `prefetch_admission_max_per_plan` 会把 cap 从实验 hack 变成正式机制。
 
 victim：
 

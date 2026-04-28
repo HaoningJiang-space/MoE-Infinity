@@ -114,9 +114,12 @@ def _merge_failure_snapshot(
             "prefetch_admitted_count_total": "prefetch_admitted_count",
             "prefetch_enqueue_count_total": "prefetch_enqueue_count",
             "prefetch_drop_count_total": "prefetch_drop_count",
+            "prefetch_drop_cap_count_total": "prefetch_drop_cap_count",
+            "prefetch_drop_pressure_count_total": "prefetch_drop_pressure_count",
             "prefetch_drop_no_evictable_count_total": (
                 "prefetch_drop_no_evictable_count"
             ),
+            "prefetch_under_pressure_count_total": "prefetch_under_pressure_count",
             "demand_prefetch_conflict_count_total": (
                 "demand_prefetch_conflict_count"
             ),
@@ -142,6 +145,17 @@ def _merge_failure_snapshot(
                     int(current or 0),
                     failure_evictable,
                 )
+
+    candidate_total = int(merged.get("prefetch_candidate_count_total", 0) or 0)
+    if candidate_total > 0:
+        merged["prefetch_admit_rate"] = float(
+            int(merged.get("prefetch_admitted_count_total", 0) or 0)
+            / candidate_total
+        )
+        merged["prefetch_pressure_drop_rate"] = float(
+            int(merged.get("prefetch_drop_pressure_count_total", 0) or 0)
+            / candidate_total
+        )
 
     merged["failure_snapshot_merged"] = True
     return merged
@@ -307,14 +321,14 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         "",
         "## Cases",
         "",
-        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | miss | evict | no-victim | pending-stall | all-locked | progress-stall | prefetch drop | conflict | locked max | evict min | fatal |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | miss | evict | no-victim | pending-stall | all-locked | progress-stall | prefetch drop | cap drop | pressure drop | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | fatal |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
         log_info = case.get("log_characterization", {})
         lines.append(
-            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {miss} | {evict} | {no_victim} | {pending_stall} | {all_locked} | {progress_stall} | {prefetch_drop} | {conflict} | {locked_max} | {evict_min} | {fatal} |".format(
+            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {miss} | {evict} | {no_victim} | {pending_stall} | {all_locked} | {progress_stall} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {admit_rate} | {pressure_drop_rate} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {fatal} |".format(
                 mode=case["mode"],
                 variant=case["variant"],
                 status=case["status"],
@@ -344,6 +358,23 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
                 ),
                 progress_stall=log_info.get("progress_stall_count", 0),
                 prefetch_drop=aggregate.get("prefetch_drop_count_total", "n/a"),
+                cap_drop=aggregate.get("prefetch_drop_cap_count_total", "n/a"),
+                pressure_drop=aggregate.get(
+                    "prefetch_drop_pressure_count_total",
+                    "n/a",
+                ),
+                admit_rate=_fmt(
+                    _safe_float(aggregate.get("prefetch_admit_rate")),
+                    4,
+                ),
+                pressure_drop_rate=_fmt(
+                    _safe_float(aggregate.get("prefetch_pressure_drop_rate")),
+                    4,
+                ),
+                under_pressure=aggregate.get(
+                    "prefetch_under_pressure_count_total",
+                    "n/a",
+                ),
                 conflict=aggregate.get("demand_prefetch_conflict_count_total", "n/a"),
                 locked_max=aggregate.get("pressure_locked_max", "n/a"),
                 evict_min=aggregate.get("pressure_evictable_min", "n/a"),

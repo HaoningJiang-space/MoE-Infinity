@@ -55,6 +55,7 @@ def test_build_qwen_benchmark_config_variants():
     assert history_backbone["prefetch_future_layers"] == 4
     assert history_backbone["prefetch_max_candidates"] == 32
     assert history_backbone["prefetch_admission_enabled"] is False
+    assert history_backbone["prefetch_admission_max_per_plan"] == -1
 
 
 def test_load_chat_trace_validates_schema(tmp_path):
@@ -135,7 +136,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_admitted_count": 8,
                 "prefetch_enqueue_count": 8,
                 "prefetch_drop_count": 2,
+                "prefetch_drop_cap_count": 1,
+                "prefetch_drop_pressure_count": 1,
                 "prefetch_drop_no_evictable_count": 1,
+                "prefetch_under_pressure_count": 2,
                 "demand_prefetch_conflict_count": 1,
                 "pressure_sample_count": 1,
                 "pressure_locked_max": 3,
@@ -169,7 +173,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_admitted_count": 15,
                 "prefetch_enqueue_count": 15,
                 "prefetch_drop_count": 5,
+                "prefetch_drop_cap_count": 3,
+                "prefetch_drop_pressure_count": 2,
                 "prefetch_drop_no_evictable_count": 4,
+                "prefetch_under_pressure_count": 5,
                 "demand_prefetch_conflict_count": 2,
                 "pressure_sample_count": 1,
                 "pressure_locked_max": 7,
@@ -192,6 +199,11 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["mean_cache_hit_rate"] == 0.625
     assert aggregate["prefetch_candidate_count_total"] == 30
     assert aggregate["prefetch_drop_count_total"] == 7
+    assert aggregate["prefetch_drop_cap_count_total"] == 4
+    assert aggregate["prefetch_drop_pressure_count_total"] == 3
+    assert aggregate["prefetch_under_pressure_count_total"] == 7
+    assert aggregate["prefetch_admit_rate"] == 23 / 30
+    assert aggregate["prefetch_pressure_drop_rate"] == 3 / 30
     assert aggregate["demand_prefetch_conflict_count_total"] == 3
     assert aggregate["pressure_locked_max"] == 7
     assert aggregate["pressure_evictable_min"] == 1

@@ -629,6 +629,13 @@ class OffloadEngine(object):
                         4,
                     )
                 )
+                self.expert_prefetcher.prefetch_admission_max_per_plan = int(
+                    getattr(
+                        self.archer_config,
+                        "prefetch_admission_max_per_plan",
+                        -1,
+                    )
+                )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,

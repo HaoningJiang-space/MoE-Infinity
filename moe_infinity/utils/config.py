@@ -174,6 +174,10 @@ class ArcherConfig:
         default=4,
         metadata={"help": "Maximum admitted prefetch candidates per GPU when lock pressure is high"},
     )
+    prefetch_admission_max_per_plan: int = field(
+        default=-1,
+        metadata={"help": "Hard cap on admitted prefetch candidates per GPU per policy step; -1 disables the cap"},
+    )
     phasea_analysis_future_layers: int = field(
         default=0,
         metadata={"help": "Analysis-only candidate future-layer window for Phase-A observation; 0 means unbounded"},
