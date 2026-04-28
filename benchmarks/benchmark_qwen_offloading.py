@@ -82,6 +82,17 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Hard cap on admitted speculative prefetch candidates per GPU per policy step; -1 disables.",
     )
+    parser.add_argument(
+        "--prefetch-credit-gated-enabled",
+        action="store_true",
+        help="Skip or limit speculative candidate materialization using upstream paging credits.",
+    )
+    parser.add_argument(
+        "--prefetch-credit-count",
+        type=int,
+        default=-1,
+        help="Speculative prefetch candidates allowed per policy step when credit gating is enabled; 0 skips generation.",
+    )
     parser.add_argument("--historical-reuse-match-topk", type=int, default=4)
     parser.add_argument(
         "--historical-reuse-match-min-required", type=int, default=2
@@ -198,6 +209,8 @@ def _run_case(
     prefetch_admission_locked_ratio_threshold: float,
     prefetch_admission_max_under_pressure: int,
     prefetch_admission_max_per_plan: int,
+    prefetch_credit_gated_enabled: bool,
+    prefetch_credit_count: int,
     historical_reuse_match_topk: int,
     historical_reuse_match_min_required: int,
     historical_reuse_consensus_min_votes: int,
@@ -256,6 +269,8 @@ def _run_case(
         prefetch_admission_locked_ratio_threshold=prefetch_admission_locked_ratio_threshold,
         prefetch_admission_max_under_pressure=prefetch_admission_max_under_pressure,
         prefetch_admission_max_per_plan=prefetch_admission_max_per_plan,
+        prefetch_credit_gated_enabled=prefetch_credit_gated_enabled,
+        prefetch_credit_count=prefetch_credit_count,
         historical_reuse_match_topk=historical_reuse_match_topk,
         historical_reuse_match_min_required=historical_reuse_match_min_required,
         historical_reuse_consensus_min_votes=historical_reuse_consensus_min_votes,
@@ -545,6 +560,8 @@ def main() -> None:
                 prefetch_admission_locked_ratio_threshold=args.prefetch_admission_locked_ratio_threshold,
                 prefetch_admission_max_under_pressure=args.prefetch_admission_max_under_pressure,
                 prefetch_admission_max_per_plan=args.prefetch_admission_max_per_plan,
+                prefetch_credit_gated_enabled=args.prefetch_credit_gated_enabled,
+                prefetch_credit_count=args.prefetch_credit_count,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,
                 historical_reuse_match_min_required=args.historical_reuse_match_min_required,
                 historical_reuse_consensus_min_votes=args.historical_reuse_consensus_min_votes,

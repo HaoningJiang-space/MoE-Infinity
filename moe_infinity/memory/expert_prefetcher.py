@@ -25,6 +25,8 @@ class ExpertPrefetcher(object):
         self.prefetch_admission_locked_ratio_threshold = 0.8
         self.prefetch_admission_max_under_pressure = 4
         self.prefetch_admission_max_per_plan = -1
+        self.prefetch_credit_gated_enabled = False
+        self.prefetch_credit_count = -1
         self.reset_prefetch_runtime_stats()
 
     def set_archer_engine(self, archer_engine):
@@ -46,6 +48,10 @@ class ExpertPrefetcher(object):
             "pressure_sample_count": 0,
             "pressure_locked_max": 0,
             "pressure_evictable_min": None,
+            "prefetch_credit_skip_count": 0,
+            "prefetch_credit_issued_total": 0,
+            "prefetch_credit_limited_count": 0,
+            "prefetch_credit_materialized_count": 0,
         }
 
     def prefetch_runtime_stats(self):
@@ -164,6 +170,15 @@ class ExpertPrefetcher(object):
         stats["prefetch_admitted_count"] += len(admitted)
         return admitted
 
+    def speculation_credit(self):
+        if not bool(getattr(self, "prefetch_credit_gated_enabled", False)):
+            return -1
+        return max(int(getattr(self, "prefetch_credit_count", 0)), 0)
+
+    def record_credit_skip(self):
+        stats = self._prefetch_runtime_stats
+        stats["prefetch_credit_skip_count"] += 1
+
     def prefetch_experts_list(self, layer_id, expert_list):
         tensor_ids = []
         for j in expert_list:
@@ -182,17 +197,45 @@ class ExpertPrefetcher(object):
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
         self.archer_engine.replace_cache_candidates(tensor_ids)
 
-    def prefetch_experts(self, layer_id, expert_matrix):
+    def _effective_max_candidates(self, max_candidates, max_candidates_override):
+        if max_candidates_override is None or int(max_candidates_override) < 0:
+            return int(max_candidates)
+        override = max(int(max_candidates_override), 0)
+        if int(max_candidates) > 0:
+            return min(int(max_candidates), override)
+        return override
+
+    def prefetch_experts(self, layer_id, expert_matrix, max_candidates_override=None):
         future_layers = int(getattr(self, "prefetch_future_layers", 0))
         max_candidates = int(getattr(self, "prefetch_max_candidates", 0))
+        effective_max_candidates = self._effective_max_candidates(
+            max_candidates,
+            max_candidates_override,
+        )
         min_score = float(getattr(self, "prefetch_candidate_min_score", 1e-6))
+        stats = self._prefetch_runtime_stats
+        if (
+            max_candidates_override is not None
+            and int(max_candidates_override) >= 0
+        ):
+            credit = max(int(max_candidates_override), 0)
+            stats["prefetch_credit_issued_total"] += credit
+            if max_candidates <= 0 or credit < max_candidates:
+                stats["prefetch_credit_limited_count"] += 1
+            if credit == 0:
+                return
         ranked_candidates = rank_prefetch_candidates(
             layer_id=layer_id,
             expert_matrix=expert_matrix,
             future_layers=future_layers,
-            max_candidates=max_candidates,
+            max_candidates=effective_max_candidates,
             min_score=min_score,
         )
+        if (
+            max_candidates_override is not None
+            and int(max_candidates_override) >= 0
+        ):
+            stats["prefetch_credit_materialized_count"] += len(ranked_candidates)
         tensor_ids = [
             self.expert_tensor_map[(candidate.layer_idx, candidate.expert_idx)]
             for candidate in ranked_candidates

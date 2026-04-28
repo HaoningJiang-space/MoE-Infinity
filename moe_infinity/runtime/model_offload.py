@@ -636,6 +636,16 @@ class OffloadEngine(object):
                         -1,
                     )
                 )
+                self.expert_prefetcher.prefetch_credit_gated_enabled = bool(
+                    getattr(
+                        self.archer_config,
+                        "prefetch_credit_gated_enabled",
+                        False,
+                    )
+                )
+                self.expert_prefetcher.prefetch_credit_count = int(
+                    getattr(self.archer_config, "prefetch_credit_count", -1)
+                )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,

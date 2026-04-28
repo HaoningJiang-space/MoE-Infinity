@@ -178,6 +178,14 @@ class ArcherConfig:
         default=-1,
         metadata={"help": "Hard cap on admitted prefetch candidates per GPU per policy step; -1 disables the cap"},
     )
+    prefetch_credit_gated_enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable upstream credit-gated speculative prefetch generation"},
+    )
+    prefetch_credit_count: int = field(
+        default=-1,
+        metadata={"help": "Speculative prefetch candidates allowed per policy step when credit gating is enabled; 0 skips generation"},
+    )
     phasea_analysis_future_layers: int = field(
         default=0,
         metadata={"help": "Analysis-only candidate future-layer window for Phase-A observation; 0 means unbounded"},

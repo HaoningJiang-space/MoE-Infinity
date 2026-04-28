@@ -56,6 +56,23 @@ def test_build_qwen_benchmark_config_variants():
     assert history_backbone["prefetch_max_candidates"] == 32
     assert history_backbone["prefetch_admission_enabled"] is False
     assert history_backbone["prefetch_admission_max_per_plan"] == -1
+    assert history_backbone["prefetch_credit_gated_enabled"] is False
+    assert history_backbone["prefetch_credit_count"] == -1
+
+    credit_gated = build_qwen_benchmark_config(
+        variant="history_reuse_local_backbone",
+        offload_path="/tmp/offload",
+        device_memory_ratio=0.6,
+        num_threads=1,
+        library_capacity=32,
+        library_metric="cosine",
+        library_admission="diversity_aware",
+        prefetch_credit_gated_enabled=True,
+        prefetch_credit_count=8,
+    )
+    assert credit_gated["historical_reuse_object_mode"] == "local_continuation"
+    assert credit_gated["prefetch_credit_gated_enabled"] is True
+    assert credit_gated["prefetch_credit_count"] == 8
 
 
 def test_load_chat_trace_validates_schema(tmp_path):
@@ -144,6 +161,10 @@ def test_percentile_and_aggregate_metrics():
                 "pressure_sample_count": 1,
                 "pressure_locked_max": 3,
                 "pressure_evictable_min": 2,
+                "prefetch_credit_skip_count": 0,
+                "prefetch_credit_issued_total": 8,
+                "prefetch_credit_limited_count": 1,
+                "prefetch_credit_materialized_count": 8,
             },
         },
         {
@@ -181,6 +202,10 @@ def test_percentile_and_aggregate_metrics():
                 "pressure_sample_count": 1,
                 "pressure_locked_max": 7,
                 "pressure_evictable_min": 1,
+                "prefetch_credit_skip_count": 4,
+                "prefetch_credit_issued_total": 8,
+                "prefetch_credit_limited_count": 1,
+                "prefetch_credit_materialized_count": 7,
             },
         },
     ]
@@ -207,6 +232,10 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["demand_prefetch_conflict_count_total"] == 3
     assert aggregate["pressure_locked_max"] == 7
     assert aggregate["pressure_evictable_min"] == 1
+    assert aggregate["prefetch_credit_skip_count_total"] == 4
+    assert aggregate["prefetch_credit_issued_total"] == 16
+    assert aggregate["prefetch_credit_limited_count_total"] == 2
+    assert aggregate["prefetch_credit_materialized_count_total"] == 15
 
 
 def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():

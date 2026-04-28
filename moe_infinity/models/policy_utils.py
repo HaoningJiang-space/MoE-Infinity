@@ -28,6 +28,22 @@ def drive_expert_policy(module, expert_index) -> None:
                 )
             continue
 
+        credit = None
+        credit_enabled = bool(
+            getattr(expert_prefetcher, "prefetch_credit_gated_enabled", False)
+        )
+        if credit_enabled and hasattr(expert_prefetcher, "speculation_credit"):
+            credit = int(expert_prefetcher.speculation_credit())
+            if credit <= 0:
+                expert_policy.update_only(
+                    seq_id,
+                    expert_index[batch_idx],
+                    module.layer_id,
+                )
+                if hasattr(expert_prefetcher, "record_credit_skip"):
+                    expert_prefetcher.record_credit_skip()
+                continue
+
         expert_matrix = expert_policy.update_and_score(
             seq_id,
             expert_index[batch_idx],
@@ -35,4 +51,8 @@ def drive_expert_policy(module, expert_index) -> None:
         )
         if expert_matrix is None:
             continue
-        expert_prefetcher.prefetch_experts(module.layer_id, expert_matrix)
+        expert_prefetcher.prefetch_experts(
+            module.layer_id,
+            expert_matrix,
+            max_candidates_override=credit,
+        )
