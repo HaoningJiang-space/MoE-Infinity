@@ -167,6 +167,31 @@ def build_summary(benchmark_root: Path) -> Dict[str, Any]:
 
 
 def _render_markdown(summary: Mapping[str, Any]) -> str:
+    any_on_demand_failed = any(
+        case["variant"] == "on_demand" and case["status"] == "failed"
+        for case in summary["cases"]
+    )
+    any_aggressive_failed = any(
+        case["mode"] == "aggressive" and case["status"] == "failed"
+        for case in summary["cases"]
+    )
+    any_no_victim = any(
+        int(case.get("aggregate", {}).get("dispatcher_no_victim_wait_count_total", 0) or 0)
+        > 0
+        for case in summary["cases"]
+    )
+    any_all_locked = any(
+        int(case.get("aggregate", {}).get("dispatcher_all_locked_event_count_total", 0) or 0)
+        > 0
+        or int(case.get("log_characterization", {}).get("all_locked_count", 0) or 0) > 0
+        for case in summary["cases"]
+    )
+    has_dispatcher_pressure = any(
+        int(case.get("aggregate", {}).get("dispatcher_eviction_count_total", 0) or 0) > 0
+        or int(case.get("aggregate", {}).get("dispatcher_cache_miss_fetch_count_total", 0) or 0)
+        > 0
+        for case in summary["cases"]
+    )
     lines = [
         "# Pressure Canary Summary",
         "",
@@ -176,14 +201,14 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         "",
         "## Cases",
         "",
-        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | all-locked | fatal |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Mode | Variant | Status | Exit | f_layers | max_cand | tok/s | mean ms/tok | p95 s | hit | miss | evict | no-victim | all-locked | fatal |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
         log_info = case.get("log_characterization", {})
         lines.append(
-            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {all_locked} | {fatal} |".format(
+            "| {mode} | {variant} | {status} | {exit_code} | {future_layers} | {max_candidates} | {tps} | {ms_tok} | {p95} | {hit} | {miss} | {evict} | {no_victim} | {all_locked} | {fatal} |".format(
                 mode=case["mode"],
                 variant=case["variant"],
                 status=case["status"],
@@ -201,18 +226,42 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
                 ),
                 p95=_fmt(_safe_float(aggregate.get("latency_p95_s")), 4),
                 hit=_fmt(_safe_float(aggregate.get("mean_cache_hit_rate")), 4),
-                all_locked=log_info.get("all_locked_count", 0),
+                miss=aggregate.get("dispatcher_cache_miss_fetch_count_total", "n/a"),
+                evict=aggregate.get("dispatcher_eviction_count_total", "n/a"),
+                no_victim=aggregate.get("dispatcher_no_victim_wait_count_total", "n/a"),
+                all_locked=aggregate.get(
+                    "dispatcher_all_locked_event_count_total",
+                    log_info.get("all_locked_count", 0),
+                ),
                 fatal=log_info.get("fatal_count", 0),
             )
         )
+    if any_on_demand_failed:
+        interpretation = [
+            "- On-demand failed, so this pressure point is too strong to isolate prefetch-induced progress issues.",
+            "- Lower pressure or add demand progress fixes before using this point as evidence.",
+        ]
+    elif any_aggressive_failed or any_no_victim or any_all_locked:
+        interpretation = [
+            "- Conservative success plus aggressive failure/no-victim/all-locked events supports the hypothesis that speculative expert traffic can violate progress under strong pressure.",
+            "- Treat this run as a robustness boundary, not a normal performance point.",
+        ]
+    elif has_dispatcher_pressure:
+        interpretation = [
+            "- All cases completed without no-victim/all-locked events, so this run does not reproduce a progress-boundary failure.",
+            "- Dispatcher miss/eviction counters are non-zero, so the run still exercises real expert paging pressure; stronger pressure or longer runs are needed to trigger the boundary.",
+        ]
+    else:
+        interpretation = [
+            "- All cases completed and dispatcher pressure counters are zero or unavailable.",
+            "- This run is mainly a sanity check; it is not sufficient evidence for paging-pressure behavior.",
+        ]
     lines.extend(
         [
             "",
             "## Interpretation",
             "",
-            "- Conservative success plus aggressive failure supports the hypothesis that speculative expert traffic can violate progress under strong pressure.",
-            "- If on-demand fails, the pressure point is too strong to isolate prefetch-induced progress issues.",
-            "- This run is a robustness canary, not a normal performance sweep.",
+            *interpretation,
             "",
         ]
     )

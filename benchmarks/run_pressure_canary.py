@@ -17,8 +17,13 @@ PYTHON = Path("/home/ziheng/miniconda3/envs/mxmoe/bin/python")
 MODEL = Path("/data/ziheng/models/Qwen1.5-MoE-A2.7B-Chat")
 TRACE_DIR = REPO / "benchmarks/traces/qwen"
 CUDA_VISIBLE_DEVICES = os.environ.get("PRESSURE_CANARY_CUDA_VISIBLE_DEVICES", "0")
-TRACE_NAME = "mixed"
-CASES = [
+TRACE_NAME = os.environ.get("PRESSURE_CANARY_TRACE_NAME", "mixed")
+DEVICE_MEMORY_RATIO = os.environ.get("PRESSURE_CANARY_DEVICE_MEMORY_RATIO", "0.30")
+WARMUP_REQUESTS = os.environ.get("PRESSURE_CANARY_WARMUP_REQUESTS", "1")
+MEASURED_REQUESTS = os.environ.get("PRESSURE_CANARY_MEASURED_REQUESTS", "8")
+MAX_NEW_TOKENS = os.environ.get("PRESSURE_CANARY_MAX_NEW_TOKENS", "16")
+MAX_INPUT_LENGTH = os.environ.get("PRESSURE_CANARY_MAX_INPUT_LENGTH", "128")
+DEFAULT_CASES = [
     ("conservative", 2, 16, "on_demand"),
     ("conservative", 2, 16, "history_reuse_consensus_backbone"),
     ("conservative", 2, 16, "history_reuse_local_backbone"),
@@ -26,6 +31,21 @@ CASES = [
     ("aggressive", 4, 32, "history_reuse_consensus_backbone"),
     ("aggressive", 4, 32, "history_reuse_local_backbone"),
 ]
+
+
+def _selected_cases() -> list[tuple[str, int, int, str]]:
+    requested = os.environ.get("PRESSURE_CANARY_CASES")
+    if not requested:
+        return DEFAULT_CASES
+    selected = {item.strip() for item in requested.split(",") if item.strip()}
+    cases = [
+        case
+        for case in DEFAULT_CASES
+        if f"{case[0]}:{case[3]}" in selected or case[0] in selected or case[3] in selected
+    ]
+    if not cases:
+        raise ValueError(f"PRESSURE_CANARY_CASES selected no cases: {requested}")
+    return cases
 
 
 def _now() -> str:
@@ -61,16 +81,16 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         "--traces",
         TRACE_NAME,
         "--warmup-requests",
-        "1",
+        WARMUP_REQUESTS,
         "--measured-requests",
-        "8",
+        MEASURED_REQUESTS,
         "--max-new-tokens",
-        "16",
+        MAX_NEW_TOKENS,
         "--fixed-new-tokens",
         "--max-input-length",
-        "128",
+        MAX_INPUT_LENGTH,
         "--device-memory-ratio",
-        "0.30",
+        DEVICE_MEMORY_RATIO,
         "--num-threads",
         "1",
         "--library-capacity",
@@ -141,7 +161,7 @@ def main() -> None:
         "mode\ttrace\tvariant\texit_code\tstarted_utc\tfinished_utc\n",
         encoding="utf-8",
     )
-    for mode, future_layers, max_candidates, variant in CASES:
+    for mode, future_layers, max_candidates, variant in _selected_cases():
         _run_case(mode, future_layers, max_candidates, variant)
     subprocess.run(
         [
