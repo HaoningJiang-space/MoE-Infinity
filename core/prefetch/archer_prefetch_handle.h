@@ -34,6 +34,7 @@ class ArcherPrefetchHandle {
 
   int GetNodeDefaultDevice(std::vector<std::uint32_t> tensor_ids) const;
   int GetNodeDevice(std::vector<std::uint32_t> tensor_ids) const;
+  std::vector<std::uint64_t> GetSparsePressureSnapshot(int gpu_id) const;
 
   void SetTensorDevice(torch::Tensor& tensor, torch::Device device) const;
 

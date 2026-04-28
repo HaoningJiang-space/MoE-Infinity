@@ -52,6 +52,10 @@ def build_qwen_benchmark_config(
     backbone_topk: int = 8,
     prefetch_future_layers: int = 4,
     prefetch_max_candidates: int = 32,
+    prefetch_admission_enabled: bool = False,
+    prefetch_admission_demand_reserve: int = 2,
+    prefetch_admission_locked_ratio_threshold: float = 0.8,
+    prefetch_admission_max_under_pressure: int = 4,
     historical_reuse_match_topk: int = 4,
     historical_reuse_match_min_required: int = 2,
     historical_reuse_consensus_min_votes: int = 2,
@@ -180,6 +184,14 @@ def build_qwen_benchmark_config(
         "prefetch_future_layers": int(prefetch_future_layers),
         "prefetch_max_candidates": int(prefetch_max_candidates),
         "prefetch_candidate_min_score": 1e-6,
+        "prefetch_admission_enabled": bool(prefetch_admission_enabled),
+        "prefetch_admission_demand_reserve": int(prefetch_admission_demand_reserve),
+        "prefetch_admission_locked_ratio_threshold": float(
+            prefetch_admission_locked_ratio_threshold
+        ),
+        "prefetch_admission_max_under_pressure": int(
+            prefetch_admission_max_under_pressure
+        ),
         "local_continuation_library_capacity": int(
             local_continuation_library_capacity
         ),
@@ -451,6 +463,44 @@ def aggregate_request_records(
         int(record.get("dispatcher_stats", {}).get("pending_stall_count", 0))
         for record in request_records
     ]
+    prefetch_candidate_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_candidate_count", 0))
+        for record in request_records
+    ]
+    prefetch_admitted_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_admitted_count", 0))
+        for record in request_records
+    ]
+    prefetch_enqueue_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_enqueue_count", 0))
+        for record in request_records
+    ]
+    prefetch_drop_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_drop_count", 0))
+        for record in request_records
+    ]
+    prefetch_drop_no_evictable_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_drop_no_evictable_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    demand_prefetch_conflict_counts = [
+        int(record.get("prefetcher_stats", {}).get("demand_prefetch_conflict_count", 0))
+        for record in request_records
+    ]
+    pressure_locked_max_values = [
+        int(record.get("prefetcher_stats", {}).get("pressure_locked_max", 0))
+        for record in request_records
+    ]
+    pressure_evictable_min_values = [
+        int(record.get("prefetcher_stats", {}).get("pressure_evictable_min", 0))
+        for record in request_records
+        if int(record.get("prefetcher_stats", {}).get("pressure_sample_count", 0))
+        > 0
+    ]
     library_query_deltas = [
         int(record.get("library_stats_delta", {}).get("query_count", 0))
         for record in request_records
@@ -515,6 +565,24 @@ def aggregate_request_records(
         "dispatcher_pending_wait_count_total": int(sum(pending_wait_counts)),
         "dispatcher_pending_wait_total_us": int(sum(pending_wait_total_us)),
         "dispatcher_pending_stall_count_total": int(sum(pending_stall_counts)),
+        "prefetch_candidate_count_total": int(sum(prefetch_candidate_counts)),
+        "prefetch_admitted_count_total": int(sum(prefetch_admitted_counts)),
+        "prefetch_enqueue_count_total": int(sum(prefetch_enqueue_counts)),
+        "prefetch_drop_count_total": int(sum(prefetch_drop_counts)),
+        "prefetch_drop_no_evictable_count_total": int(
+            sum(prefetch_drop_no_evictable_counts)
+        ),
+        "demand_prefetch_conflict_count_total": int(
+            sum(demand_prefetch_conflict_counts)
+        ),
+        "pressure_locked_max": (
+            int(max(pressure_locked_max_values)) if pressure_locked_max_values else 0
+        ),
+        "pressure_evictable_min": (
+            int(min(pressure_evictable_min_values))
+            if pressure_evictable_min_values
+            else 0
+        ),
         "mean_dispatcher_cache_hit_fetch_count": (
             float(sum(cache_hit_fetch_counts) / request_count)
             if request_count
@@ -658,15 +726,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | conflict | locked max | evict min | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -686,6 +754,10 @@ def render_markdown_summary(
                     pending_stalls=agg.get(
                         "mean_dispatcher_pending_stall_count", 0.0
                     ),
+                    prefetch_drop=agg.get("prefetch_drop_count_total", 0),
+                    conflict=agg.get("demand_prefetch_conflict_count_total", 0),
+                    locked_max=agg.get("pressure_locked_max", 0),
+                    evict_min=agg.get("pressure_evictable_min", 0),
                     hit=agg["mean_cache_hit_rate"],
                 )
             )

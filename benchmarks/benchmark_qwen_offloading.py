@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -63,6 +64,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone-topk", type=int, default=8)
     parser.add_argument("--prefetch-future-layers", type=int, default=4)
     parser.add_argument("--prefetch-max-candidates", type=int, default=32)
+    parser.add_argument(
+        "--prefetch-admission-enabled",
+        action="store_true",
+        help="Enable evictability-aware admission for speculative expert prefetch.",
+    )
+    parser.add_argument("--prefetch-admission-demand-reserve", type=int, default=2)
+    parser.add_argument(
+        "--prefetch-admission-locked-ratio-threshold",
+        type=float,
+        default=0.8,
+    )
+    parser.add_argument("--prefetch-admission-max-under-pressure", type=int, default=4)
     parser.add_argument("--historical-reuse-match-topk", type=int, default=4)
     parser.add_argument(
         "--historical-reuse-match-min-required", type=int, default=2
@@ -138,6 +151,19 @@ def _snapshot_cache_hit_rate(model: MoE) -> Dict[str, float | int]:
         return {}
 
 
+def _snapshot_prefetcher_stats(model: MoE) -> Dict[str, int | float | None]:
+    prefetcher = getattr(model.engine, "expert_prefetcher", None)
+    if prefetcher is None or not hasattr(prefetcher, "prefetch_runtime_stats"):
+        return {}
+    return dict(prefetcher.prefetch_runtime_stats())
+
+
+def _snapshot_dispatcher_stats(dispatcher: Any) -> Dict[str, int]:
+    if dispatcher is None or not hasattr(dispatcher, "get_runtime_stats"):
+        return {}
+    return dispatcher_stats_dict(dispatcher.get_runtime_stats())
+
+
 def _run_case(
     *,
     model_path: str,
@@ -161,6 +187,10 @@ def _run_case(
     backbone_topk: int,
     prefetch_future_layers: int,
     prefetch_max_candidates: int,
+    prefetch_admission_enabled: bool,
+    prefetch_admission_demand_reserve: int,
+    prefetch_admission_locked_ratio_threshold: float,
+    prefetch_admission_max_under_pressure: int,
     historical_reuse_match_topk: int,
     historical_reuse_match_min_required: int,
     historical_reuse_consensus_min_votes: int,
@@ -214,6 +244,10 @@ def _run_case(
         backbone_topk=backbone_topk,
         prefetch_future_layers=prefetch_future_layers,
         prefetch_max_candidates=prefetch_max_candidates,
+        prefetch_admission_enabled=prefetch_admission_enabled,
+        prefetch_admission_demand_reserve=prefetch_admission_demand_reserve,
+        prefetch_admission_locked_ratio_threshold=prefetch_admission_locked_ratio_threshold,
+        prefetch_admission_max_under_pressure=prefetch_admission_max_under_pressure,
         historical_reuse_match_topk=historical_reuse_match_topk,
         historical_reuse_match_min_required=historical_reuse_match_min_required,
         historical_reuse_consensus_min_votes=historical_reuse_consensus_min_votes,
@@ -239,8 +273,8 @@ def _run_case(
             model.engine.offloading_policy.attach_phasea_recorder(recorder)
     dispatcher = model.engine.expert_dispatcher
 
+    records: List[Dict[str, Any]] = []
     try:
-        records: List[Dict[str, Any]] = []
         previous_library_stats: Dict[str, int] = {}
         previous_cache_stats: Dict[str, float | int] = {}
         generation_kwargs: Dict[str, Any] = {
@@ -254,6 +288,11 @@ def _run_case(
         for index, request in enumerate(selected_requests):
             if hasattr(dispatcher, "reset_runtime_stats"):
                 dispatcher.reset_runtime_stats()
+            prefetcher = getattr(model.engine, "expert_prefetcher", None)
+            if prefetcher is not None and hasattr(
+                prefetcher, "reset_prefetch_runtime_stats"
+            ):
+                prefetcher.reset_prefetch_runtime_stats()
             prompt = tokenizer.apply_chat_template(
                 request.messages,
                 tokenize=False,
@@ -271,19 +310,68 @@ def _run_case(
 
             is_warmup = index < warmup_requests
             start = time.perf_counter()
-            model.engine.phasea_request_context = {
+            request_context = {
                 "request_id": request.request_id,
                 "trace_name": trace_name,
                 "tag": request.tag,
                 "variant": variant,
                 "is_warmup": is_warmup,
             }
-            with torch.no_grad():
-                outputs = model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    **generation_kwargs,
+            model.engine.phasea_request_context = request_context
+            try:
+                with torch.no_grad():
+                    outputs = model.generate(
+                        input_ids,
+                        attention_mask=attention_mask,
+                        **generation_kwargs,
+                    )
+            except Exception as exc:
+                latency_s = time.perf_counter() - start
+                failure = {
+                    "trace_name": trace_name,
+                    "variant": variant,
+                    "request_index": index,
+                    "request_id": request.request_id,
+                    "tag": request.tag,
+                    "is_warmup": is_warmup,
+                    "input_tokens": input_token_count,
+                    "latency_s": latency_s,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "dispatcher_stats": _snapshot_dispatcher_stats(dispatcher),
+                    "prefetcher_stats": _snapshot_prefetcher_stats(model),
+                    "library_stats": _snapshot_library_stats(model),
+                    "cache_hit_rate_snapshot": _snapshot_cache_hit_rate(model),
+                }
+                measured = [record for record in records if not record["is_warmup"]]
+                partial_result = {
+                    "failed": True,
+                    "trace_name": trace_name,
+                    "trace_path": str(trace_path),
+                    "variant": variant,
+                    "config": config,
+                    "offload_path": case_paths["offload_path"],
+                    "warmup_requests": warmup_requests,
+                    "measured_requests": measured_requests,
+                    "max_new_tokens": max_new_tokens,
+                    "fixed_new_tokens": bool(fixed_new_tokens),
+                    "max_input_length": max_input_length,
+                    "generation_kwargs": generation_kwargs,
+                    "trace_preflight": trace_preflight,
+                    "phasea_events_jsonl": (
+                        case_paths["phasea_events_jsonl"] if phasea_events else None
+                    ),
+                    "records": records,
+                    "failure": failure,
+                    "aggregate": aggregate_request_records(measured),
+                }
+                raw_path = Path(case_paths["raw_json"])
+                raw_path.write_text(
+                    json.dumps(partial_result, indent=2),
+                    encoding="utf-8",
                 )
+                raise
             latency_s = time.perf_counter() - start
 
             generated_ids = outputs[0][input_ids.shape[1] :]
@@ -291,11 +379,8 @@ def _run_case(
                 generated_ids,
                 skip_special_tokens=True,
             )
-            dispatcher_stats = {}
-            if hasattr(dispatcher, "get_runtime_stats"):
-                dispatcher_stats = dispatcher_stats_dict(
-                    dispatcher.get_runtime_stats()
-                )
+            dispatcher_stats = _snapshot_dispatcher_stats(dispatcher)
+            prefetcher_stats = _snapshot_prefetcher_stats(model)
             library_stats = _snapshot_library_stats(model)
             library_stats_delta = diff_counter_dict(
                 library_stats,
@@ -344,6 +429,7 @@ def _run_case(
                 ),
                 "response_text_prefix": generated_text[:160],
                 "dispatcher_stats": dispatcher_stats,
+                "prefetcher_stats": prefetcher_stats,
                 "library_stats": library_stats,
                 "library_stats_delta": library_stats_delta,
                 "cache_hit_rate_snapshot": cache_hit_rate_snapshot,
@@ -446,6 +532,10 @@ def main() -> None:
                 backbone_topk=args.backbone_topk,
                 prefetch_future_layers=args.prefetch_future_layers,
                 prefetch_max_candidates=args.prefetch_max_candidates,
+                prefetch_admission_enabled=args.prefetch_admission_enabled,
+                prefetch_admission_demand_reserve=args.prefetch_admission_demand_reserve,
+                prefetch_admission_locked_ratio_threshold=args.prefetch_admission_locked_ratio_threshold,
+                prefetch_admission_max_under_pressure=args.prefetch_admission_max_under_pressure,
                 historical_reuse_match_topk=args.historical_reuse_match_topk,
                 historical_reuse_match_min_required=args.historical_reuse_match_min_required,
                 historical_reuse_consensus_min_votes=args.historical_reuse_consensus_min_votes,

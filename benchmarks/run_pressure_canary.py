@@ -23,6 +23,18 @@ WARMUP_REQUESTS = os.environ.get("PRESSURE_CANARY_WARMUP_REQUESTS", "1")
 MEASURED_REQUESTS = os.environ.get("PRESSURE_CANARY_MEASURED_REQUESTS", "8")
 MAX_NEW_TOKENS = os.environ.get("PRESSURE_CANARY_MAX_NEW_TOKENS", "16")
 MAX_INPUT_LENGTH = os.environ.get("PRESSURE_CANARY_MAX_INPUT_LENGTH", "128")
+PREFETCH_ADMISSION_ENABLED = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_ADMISSION_ENABLED", "0"
+).lower() in {"1", "true", "yes", "on"}
+PREFETCH_ADMISSION_DEMAND_RESERVE = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_ADMISSION_DEMAND_RESERVE", "2"
+)
+PREFETCH_ADMISSION_LOCKED_RATIO_THRESHOLD = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_ADMISSION_LOCKED_RATIO_THRESHOLD", "0.8"
+)
+PREFETCH_ADMISSION_MAX_UNDER_PRESSURE = os.environ.get(
+    "PRESSURE_CANARY_PREFETCH_ADMISSION_MAX_UNDER_PRESSURE", "4"
+)
 DEFAULT_CASES = [
     ("conservative", 2, 16, "on_demand"),
     ("conservative", 2, 16, "history_reuse_consensus_backbone"),
@@ -103,6 +115,12 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         str(future_layers),
         "--prefetch-max-candidates",
         str(max_candidates),
+        "--prefetch-admission-demand-reserve",
+        PREFETCH_ADMISSION_DEMAND_RESERVE,
+        "--prefetch-admission-locked-ratio-threshold",
+        PREFETCH_ADMISSION_LOCKED_RATIO_THRESHOLD,
+        "--prefetch-admission-max-under-pressure",
+        PREFETCH_ADMISSION_MAX_UNDER_PRESSURE,
         "--historical-reuse-match-topk",
         "4",
         "--historical-reuse-match-min-required",
@@ -127,6 +145,8 @@ def _run_case(mode: str, future_layers: int, max_candidates: int, variant: str) 
         "--phasea-analysis-max-ranked-candidates",
         "128",
     ]
+    if PREFETCH_ADMISSION_ENABLED:
+        cmd.append("--prefetch-admission-enabled")
     env = os.environ.copy()
     env.update(
         {

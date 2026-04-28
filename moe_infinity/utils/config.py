@@ -158,6 +158,22 @@ class ArcherConfig:
         default=1e-6,
         metadata={"help": "Minimum candidate score required to keep an expert in the prefetch candidate set"},
     )
+    prefetch_admission_enabled: bool = field(
+        default=False,
+        metadata={"help": "Enable evictability-aware admission for speculative expert prefetch"},
+    )
+    prefetch_admission_demand_reserve: int = field(
+        default=2,
+        metadata={"help": "Minimum evictable expert slots reserved for demand fetches before admitting prefetch"},
+    )
+    prefetch_admission_locked_ratio_threshold: float = field(
+        default=0.8,
+        metadata={"help": "Locked/cached sparse expert ratio that triggers prefetch throttling"},
+    )
+    prefetch_admission_max_under_pressure: int = field(
+        default=4,
+        metadata={"help": "Maximum admitted prefetch candidates per GPU when lock pressure is high"},
+    )
     phasea_analysis_future_layers: int = field(
         default=0,
         metadata={"help": "Analysis-only candidate future-layer window for Phase-A observation; 0 means unbounded"},

@@ -224,6 +224,45 @@ void ArcherPrefetchHandle::EnqueuePrefetch(const uint32_t tensor_id,
   kTaskPool->EnqueueTask(task);
 }
 
+std::vector<std::uint64_t> ArcherPrefetchHandle::GetSparsePressureSnapshot(
+    int gpu_id) const {
+  std::uint64_t cached_count = 0;
+  std::uint64_t locked_count = 0;
+  std::uint64_t evictable_count = 0;
+  std::uint64_t sparse_bytes = 0;
+  std::uint64_t sparse_cache_limit = 0;
+  std::uint64_t free_memory = 0;
+
+  if (kTopologyHandle == nullptr || kDeviceMemoryPool == nullptr) {
+    return {cached_count, locked_count, evictable_count, sparse_bytes,
+            sparse_cache_limit, free_memory};
+  }
+
+  auto device = torch::Device(torch::kCUDA, gpu_id);
+  auto sparse_nodes = kTopologyHandle->GetSparseNodes();
+  for (auto& node : sparse_nodes) {
+    if (node == nullptr || !node->device.is_cuda() ||
+        node->device.index() != gpu_id) {
+      continue;
+    }
+    cached_count += 1;
+    sparse_bytes += static_cast<std::uint64_t>(node->byte_size);
+    if (node->mutex.try_lock()) {
+      evictable_count += 1;
+      node->mutex.unlock();
+    } else {
+      locked_count += 1;
+    }
+  }
+
+  sparse_cache_limit =
+      static_cast<std::uint64_t>(kTopologyHandle->GetSparseCacheLimit(device));
+  free_memory =
+      static_cast<std::uint64_t>(kDeviceMemoryPool->GetFreeMemory(device));
+  return {cached_count, locked_count, evictable_count, sparse_bytes,
+          sparse_cache_limit, free_memory};
+}
+
 void ArcherPrefetchHandle::FetchTensors(
     std::uint64_t& request_id, const std::vector<std::uint32_t>& buffer) {
   // std::vector<NodePtr> candidates;

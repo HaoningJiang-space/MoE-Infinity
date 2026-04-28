@@ -175,6 +175,17 @@ Continuation Cache for MoE Expert Paging
   - v17：修正 pending-stall guard 后，`local` 自动抛出 `WaitHiddenStates progress stall`。
   - 关键诊断是 `pending=1`, `no_victim_wait=613`, `idle_us=60003517`。
   - 这说明当前还不是最终修复，而是把 fatal/silent stall 推进成可诊断 failure。
+- v18/v19/v20 开始把 progress failure 推向 mitigation:
+  - v18：第一版 admission-v1 仍失败，说明只在 locked-ratio 高时限流太晚。
+  - v19：strict admission 把 speculative prefetch 全部 drop，同样 `ratio_030/local/aggressive` 完成；miss `5959`、evict `2621`，但 no-victim/all-locked/pending-stall 都是 `0`。
+  - v20：bounded admission 每个 plan 放行少量 prefetch，admitted/enqueued `47104`、drop `302822`，同样完成；miss `8908`、evict `3389`，no-victim/all-locked/pending-stall 仍是 `0`。
+  - 这说明 `ratio_030` 不是必然不可跑；问题来自 unbounded speculative expert traffic，bounded admission 可以恢复 demand progress。
+
+这组结果对主线的影响：
+
+- continuation cache 仍然是 retrieval-object mismatch 的核心证据。
+- 但 HPCA 方向不应写成“local continuation 更会 prefetch”。
+- 更强的说法是：local continuation 让上层 hint 更局部、更激进，从而暴露了底层 expert paging contract 缺失；需要把 speculative expert traffic 降级成 best-effort / bounded traffic，保证 demand progress。
 
 ### 第二阶段：增强方向
 

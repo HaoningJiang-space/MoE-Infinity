@@ -54,6 +54,7 @@ def test_build_qwen_benchmark_config_variants():
     assert history_backbone["prefetch_backbone_topk"] == 8
     assert history_backbone["prefetch_future_layers"] == 4
     assert history_backbone["prefetch_max_candidates"] == 32
+    assert history_backbone["prefetch_admission_enabled"] is False
 
 
 def test_load_chat_trace_validates_schema(tmp_path):
@@ -129,6 +130,17 @@ def test_percentile_and_aggregate_metrics():
                 "admit_count": 1,
             },
             "cache_hit_rate_delta": {"overall_hit_rate": 0.5},
+            "prefetcher_stats": {
+                "prefetch_candidate_count": 10,
+                "prefetch_admitted_count": 8,
+                "prefetch_enqueue_count": 8,
+                "prefetch_drop_count": 2,
+                "prefetch_drop_no_evictable_count": 1,
+                "demand_prefetch_conflict_count": 1,
+                "pressure_sample_count": 1,
+                "pressure_locked_max": 3,
+                "pressure_evictable_min": 2,
+            },
         },
         {
             "latency_s": 2.0,
@@ -152,6 +164,17 @@ def test_percentile_and_aggregate_metrics():
                 "admit_count": 1,
             },
             "cache_hit_rate_delta": {"overall_hit_rate": 0.75},
+            "prefetcher_stats": {
+                "prefetch_candidate_count": 20,
+                "prefetch_admitted_count": 15,
+                "prefetch_enqueue_count": 15,
+                "prefetch_drop_count": 5,
+                "prefetch_drop_no_evictable_count": 4,
+                "demand_prefetch_conflict_count": 2,
+                "pressure_sample_count": 1,
+                "pressure_locked_max": 7,
+                "pressure_evictable_min": 1,
+            },
         },
     ]
     aggregate = aggregate_request_records(records)
@@ -167,6 +190,11 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["mean_dispatcher_no_victim_wait_total_us"] == 40.0
     assert aggregate["p95_dispatcher_no_victim_wait_max_us"] > 0.0
     assert aggregate["mean_cache_hit_rate"] == 0.625
+    assert aggregate["prefetch_candidate_count_total"] == 30
+    assert aggregate["prefetch_drop_count_total"] == 7
+    assert aggregate["demand_prefetch_conflict_count_total"] == 3
+    assert aggregate["pressure_locked_max"] == 7
+    assert aggregate["pressure_evictable_min"] == 1
 
 
 def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():

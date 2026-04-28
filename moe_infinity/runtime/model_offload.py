@@ -609,6 +609,26 @@ class OffloadEngine(object):
                 self.expert_prefetcher.prefetch_candidate_min_score = float(
                     getattr(self.archer_config, "prefetch_candidate_min_score", 1e-6)
                 )
+                self.expert_prefetcher.prefetch_admission_enabled = bool(
+                    getattr(self.archer_config, "prefetch_admission_enabled", False)
+                )
+                self.expert_prefetcher.prefetch_admission_demand_reserve = int(
+                    getattr(self.archer_config, "prefetch_admission_demand_reserve", 2)
+                )
+                self.expert_prefetcher.prefetch_admission_locked_ratio_threshold = float(
+                    getattr(
+                        self.archer_config,
+                        "prefetch_admission_locked_ratio_threshold",
+                        0.8,
+                    )
+                )
+                self.expert_prefetcher.prefetch_admission_max_under_pressure = int(
+                    getattr(
+                        self.archer_config,
+                        "prefetch_admission_max_under_pressure",
+                        4,
+                    )
+                )
                 self.expert_dispatcher = self.prefetch_lib.expert_dispatcher(
                     self.num_experts,
                     self.num_layers,

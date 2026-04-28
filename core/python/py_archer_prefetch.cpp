@@ -82,6 +82,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("replace_cache_candidates",
            &ArcherPrefetchHandle::ReplaceCacheCandidates)
       .def("enqueue_prefetch", &ArcherPrefetchHandle::EnqueuePrefetch)
+      .def("get_sparse_pressure_snapshot",
+           &ArcherPrefetchHandle::GetSparsePressureSnapshot)
       .def("fetch_tensors", &ArcherPrefetchHandle::FetchTensors)
       .def("clean_up_resources", &ArcherPrefetchHandle::CleanUpResources);
   //    .def("set_node_cache_priority",

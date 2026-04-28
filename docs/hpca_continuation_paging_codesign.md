@@ -137,7 +137,7 @@ v10 fixed-length pressure sweep 的已完成部分显示：
 
 - `/data/ziheng/moe_infinity_fgo_runs/phasea_v10_runtime_fixedlen_qwen_pressure_sweep/analysis/pressure_sweep_summary.md`
 
-### 3. v10b/v13/v15/v17 暴露了第二层问题：runtime progress
+### 3. v10b/v13/v15/v17/v18/v19/v20 暴露并开始闭环第二层问题：runtime progress
 
 v10b strong-pressure run 的关键现象：
 
@@ -191,6 +191,52 @@ v17 的含义要克制解释：
 > 这不是最终修复。  
 > 它只说明 runtime 已经从 fatal / silent stall 前进到可诊断的 progress failure。  
 > 真正的下一步是 prefetch admission / demand reserve / drop-defer，而不是继续调 predictor。
+
+v18 在同一类 targeted boundary 上打开第一版 prefetch admission，但仍然失败：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v18_prefetch_admission_local_timeout`
+- 配置：`mixed / history_reuse_local_backbone`, `ratio=0.30`, `future_layers=4`, `max_candidates=32`
+- admission：enabled, `demand_reserve=2`, `locked_ratio_threshold=0.8`, `max_under_pressure=4`
+- 结果：exit code `1`
+- 关键诊断：`pending=1`, `enqueue=1560`, `fetch_dequeue=195`, `exec_dequeue=1559`, `output=1559`, `eviction=19`, `no_victim_wait=613`, `idle_us=60003469`
+- summary 中 `all-locked=639`, `progress-stall=1`
+
+v18 的含义是：
+
+> 只在“看起来已经锁很多”时才限流太晚。
+> admission 必须更像 contract，而不是事后补救；speculative prefetch 的进入量本身要被 bounded。
+
+v19 是 strict admission control：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v19_prefetch_admission_strict_local`
+- 配置：同样 `ratio=0.30`, `future_layers=4`, `max_candidates=32`, `warmup=2`, `measured=32`
+- admission：enabled, `demand_reserve=64`, `locked_ratio_threshold=0.0`, `max_under_pressure=0`
+- 结果：完成，exit code `0`
+- miss `5959`, eviction `2621`，说明仍然是真实 paging pressure
+- `no-victim=0`, `all-locked=0`, `pending-stall=0`
+- prefetch candidate `349208`, admitted `0`, drop `349208`
+
+v19 的含义是：
+
+> `ratio=0.30` 本身不是必崩点。
+> 当 speculative prefetch 全部被 admission 掉，demand-only 路径可以保持 progress。
+> 这把 failure 从“内存比例太低”收紧成“aggressive speculative expert traffic 破坏 progress”。
+
+v20 是 bounded speculation：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v20_prefetch_admission_cap4_local`
+- 配置：同样 `ratio=0.30`, `future_layers=4`, `max_candidates=32`, `warmup=2`, `measured=32`
+- admission：enabled, `demand_reserve=64`, `locked_ratio_threshold=0.0`, `max_under_pressure=4`
+- 结果：完成，exit code `0`
+- miss `8908`, eviction `3389`，仍然有明显 paging pressure
+- `no-victim=0`, `all-locked=0`, `pending-stall=0`
+- prefetch candidate `349926`, admitted/enqueued `47104`, drop `302822`
+
+v20 的含义比 v19 更重要：
+
+> 不需要完全关闭 prefetch。
+> 只要把 speculative expert traffic 做 bounded admission，系统就能在强 pressure 下保住 demand progress。
+> 这支持 HPCA 主张：关键不是再调 predictor，而是给 speculative expert traffic 加 MoE-specific paging contract。
 
 这正是 HPCA 切入口：
 
@@ -600,6 +646,9 @@ runtime 需要看到这些状态：
 - v13 长 boundary：on-demand 完成，consensus 完成但 miss/evict 和 latency 明显上升，local 进入 progress stall。
 - v15 长 boundary：on-demand 和 consensus 完成，local aggressive 进入 no-victim/all-locked 循环并被人工终止。
 - v17 targeted boundary：local aggressive 自动抛出 `WaitHiddenStates progress stall`，把 silent/fatal failure 转成结构化诊断。
+- v18 targeted admission-v1：默认压力门控仍然太晚，local aggressive 继续触发 progress stall。
+- v19 strict admission：drop 全部 speculative prefetch 后，同样 pressure 下 demand progress 恢复。
+- v20 cap4 admission：每个 prefetch plan 放行少量 speculative experts，其余 drop；仍然完成，且 miss/evict 非零。
 
 ### Stage 3：修 progress bug
 
@@ -614,15 +663,15 @@ runtime 需要看到这些状态：
 当前状态：
 
 - 第 1/2/4 步已经有第一版实现，并在 v17 中证明能诊断 progress stall。
-- 第 3/5 步还没闭环，是下一阶段最重要的代码工作。
-- 现在不能把 v17 说成 progress guarantee，只能说是 progress guard / failure characterization。
+- 第 3/5 步已经有第一版 admission + counter 实现：v19/v20 证明 drop / bounded admission 可以恢复 progress。
+- 现在还不能把它说成最终硬件机制，只能说是 software proof-of-concept：prefetch 从 hard traffic 被降级成 best-effort / bounded speculative traffic。
 
 验收标准：
 
-- v10b 同类强压力配置不再 fatal。
-- aggressive prefetch 不一定变快，但 demand progress 保住。
-- prefetch drop/defer 随 pressure 上升而上升。
-- no-victim wait 从 fatal log 变成可量化指标。
+- v10b 同类强压力配置不再 fatal：v19/v20 已初步满足。
+- aggressive prefetch 不一定变快，但 demand progress 保住：v19/v20 已初步满足。
+- prefetch drop/defer 随 pressure 上升而上升：v19/v20 已有 drop counter，defer 还未实现。
+- no-victim wait 从 fatal log 变成可量化指标：v17/v18 已经能结构化暴露，v19/v20 在 admission 后降为 0。
 
 这一步不能只写成“修了一个 bug”。论文里要把它解释为：
 
@@ -711,14 +760,18 @@ robustness boundary：
 
 还需要：
 
-- prefetch drop count
 - prefetch defer count
-- demand/prefetch conflict count
-- evictable-node count snapshot
-- locked-node count snapshot
 - expired prefetch count
 - canceled prefetch count
 - late prefetch count
+
+已补第一版：
+
+- prefetch candidate/admitted/enqueue/drop count
+- demand/prefetch conflict count
+- evictable-node count snapshot
+- locked-node count snapshot
+- failure raw artifact：即使 request 中途 `RuntimeError`，也会写出 partial raw 和 failure snapshot
 
 ### P2：补 timing breakdown
 
@@ -753,6 +806,12 @@ prefetch：
 - best-effort
 - drop/defer/throttle under pressure
 - 不占 demand reserve
+
+当前实现状态：
+
+- 已支持 drop / bounded admission。
+- 还没有真正 defer queue。
+- 当前 cap 通过 admission 参数实现，后续应改成更明确的 deadline/pressure policy。
 
 victim：
 
