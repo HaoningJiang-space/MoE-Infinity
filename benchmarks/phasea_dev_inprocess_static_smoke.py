@@ -42,6 +42,8 @@ TRACE_DIR = Path(os.environ.get("DEV_TRACE_DIR", str(REPO / "benchmarks/traces/q
 TRACE_NAME = os.environ.get("DEV_TRACE_NAME", "mixed")
 OFFLOAD_CACHE_TEMPLATE = os.environ.get("DEV_OFFLOAD_CACHE_TEMPLATE", "")
 RESET_BETWEEN_CASES = os.environ.get("DEV_RESET_BETWEEN_CASES", "1") != "0"
+DEV_WARMUP_REQUESTS = int(os.environ.get("DEV_WARMUP_REQUESTS", "0"))
+DEV_REPEATS = int(os.environ.get("DEV_REPEATS", "1"))
 
 
 CASES: Dict[str, Dict[str, Any]] = {
@@ -161,7 +163,9 @@ def _run_case(
     model: MoE,
     tokenizer,
     requests,
+    run_label: str,
     case_name: str,
+    warmup_requests: int,
     max_input_length: int,
     max_new_tokens: int,
 ) -> Dict[str, Any]:
@@ -182,6 +186,7 @@ def _run_case(
     device = torch.device("cuda:0")
 
     for index, request in enumerate(requests):
+        is_warmup = index < int(warmup_requests)
         if hasattr(dispatcher, "reset_runtime_stats"):
             dispatcher.reset_runtime_stats()
         if hasattr(prefetcher, "reset_prefetch_runtime_stats"):
@@ -204,8 +209,8 @@ def _run_case(
             "request_id": request.request_id,
             "trace_name": TRACE_NAME,
             "tag": request.tag,
-            "variant": case_name,
-            "is_warmup": False,
+            "variant": run_label,
+            "is_warmup": is_warmup,
         }
 
         start = time.perf_counter()
@@ -253,11 +258,11 @@ def _run_case(
         records.append(
             {
                 "trace_name": TRACE_NAME,
-                "variant": case_name,
+                "variant": run_label,
                 "request_index": index,
                 "request_id": request.request_id,
                 "tag": request.tag,
-                "is_warmup": False,
+                "is_warmup": is_warmup,
                 "input_tokens": input_token_count,
                 "latency_s": latency_s,
                 "generated_tokens": int(generated_ids.numel()),
@@ -276,8 +281,11 @@ def _run_case(
         previous_cache_stats = cache_hit_rate_snapshot
 
     return {
+        "run_label": run_label,
         "case_name": case_name,
         "case": case,
+        "warmup_requests": int(warmup_requests),
+        "measured_requests": max(len(requests) - int(warmup_requests), 0),
         "reset_info": reset_info,
         "protocol_note": (
             "This harness loads one model process and resets runtime state before each case "
@@ -285,8 +293,19 @@ def _run_case(
             "with a new-process bracket run."
         ),
         "records": records,
-        "aggregate": aggregate_request_records(records),
+        "aggregate": aggregate_request_records(
+            [record for record in records if not record["is_warmup"]]
+        ),
     }
+
+
+def _slow_request_count(result: Dict[str, Any], threshold_ms: float = 150.0) -> int:
+    return sum(
+        1
+        for record in result.get("records", [])
+        if not record.get("is_warmup", False)
+        and float(record.get("latency_per_generated_token_ms", 0.0)) > threshold_ms
+    )
 
 
 def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> str:
@@ -298,17 +317,21 @@ def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> 
         f"- model_load_s: {setup_timing.get('model_load_s', 0.0):.2f}",
         f"- total_setup_s: {setup_timing.get('total_setup_s', 0.0):.2f}",
         f"- reset_between_cases: {str(RESET_BETWEEN_CASES).lower()}",
+        f"- warmup_requests_per_case: {DEV_WARMUP_REQUESTS}",
+        f"- repeats: {DEV_REPEATS}",
         "",
-        "| case | tok/s | ms/token | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| run | case | tok/s | ms/token | slow req >150ms | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for name, result in results.items():
+    for run_label, result in results.items():
         agg = result.get("aggregate", {})
         lines.append(
-            "| {name} | {tps:.3f} | {mpt:.2f} | {cand} | {admit} | {rt_enq} | {push} | {skip} | {comp} | {miss} | {evict} |".format(
-                name=name,
+            "| {run} | {case} | {tps:.3f} | {mpt:.2f} | {slow} | {cand} | {admit} | {rt_enq} | {push} | {skip} | {comp} | {miss} | {evict} |".format(
+                run=run_label,
+                case=result.get("case_name", ""),
                 tps=float(agg.get("generated_tokens_per_second", 0.0)),
                 mpt=float(agg.get("latency_per_generated_token_mean_ms", 0.0)),
+                slow=_slow_request_count(result),
                 cand=agg.get("prefetch_candidate_count_total", 0),
                 admit=agg.get("prefetch_admitted_count_total", 0),
                 rt_enq=agg.get("prefetch_runtime_enqueue_count_total", 0),
@@ -335,7 +358,8 @@ def main() -> None:
     measured_requests = int(os.environ.get("DEV_MEASURED_REQUESTS", "2"))
     max_input_length = int(os.environ.get("DEV_MAX_INPUT_LENGTH", "128"))
     max_new_tokens = int(os.environ.get("DEV_MAX_NEW_TOKENS", "8"))
-    requests = load_chat_trace(trace_path)[:measured_requests]
+    request_count = DEV_WARMUP_REQUESTS + measured_requests
+    requests = load_chat_trace(trace_path)[:request_count]
 
     setup_start = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(
@@ -368,19 +392,23 @@ def main() -> None:
 
     results: Dict[str, Any] = {}
     try:
-        for case_name in _selected_case_names():
-            with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
-                log.write(f"[{_now()}] start {case_name}\n")
-            results[case_name] = _run_case(
-                model=model,
-                tokenizer=tokenizer,
-                requests=requests,
-                case_name=case_name,
-                max_input_length=max_input_length,
-                max_new_tokens=max_new_tokens,
-            )
-            with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
-                log.write(f"[{_now()}] done {case_name}\n")
+        for repeat_idx in range(max(DEV_REPEATS, 1)):
+            for case_idx, case_name in enumerate(_selected_case_names()):
+                run_label = f"r{repeat_idx:02d}__c{case_idx:02d}__{case_name}"
+                with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
+                    log.write(f"[{_now()}] start {run_label}\n")
+                results[run_label] = _run_case(
+                    model=model,
+                    tokenizer=tokenizer,
+                    requests=requests,
+                    run_label=run_label,
+                    case_name=case_name,
+                    warmup_requests=DEV_WARMUP_REQUESTS,
+                    max_input_length=max_input_length,
+                    max_new_tokens=max_new_tokens,
+                )
+                with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
+                    log.write(f"[{_now()}] done {run_label}\n")
     finally:
         del model
         torch.cuda.empty_cache()
@@ -389,6 +417,9 @@ def main() -> None:
         "setup_timing": setup_timing,
         "offload_cache_template": OFFLOAD_CACHE_TEMPLATE,
         "reset_between_cases": RESET_BETWEEN_CASES,
+        "warmup_requests": DEV_WARMUP_REQUESTS,
+        "measured_requests": measured_requests,
+        "repeats": DEV_REPEATS,
         "results": results,
     }
     (ROOT / "analysis" / "dev_inprocess_static_smoke.json").write_text(
