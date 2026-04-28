@@ -165,6 +165,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_credit_issued_total": 8,
                 "prefetch_credit_limited_count": 1,
                 "prefetch_credit_materialized_count": 8,
+                "prefetch_plan_replace_count": 2,
+                "prefetch_plan_empty_replace_count": 1,
+                "prefetch_plan_candidate_count": 8,
+                "prefetch_plan_cleared_candidate_count": 4,
             },
         },
         {
@@ -188,7 +192,10 @@ def test_percentile_and_aggregate_metrics():
                 "hit_count": 3,
                 "admit_count": 1,
             },
-            "cache_hit_rate_delta": {"overall_hit_rate": 0.75},
+            "cache_hit_rate_delta": {
+                "overall_hit_rate": 0.75,
+                "prefetch_count": 3,
+            },
             "prefetcher_stats": {
                 "prefetch_candidate_count": 20,
                 "prefetch_admitted_count": 15,
@@ -206,6 +213,10 @@ def test_percentile_and_aggregate_metrics():
                 "prefetch_credit_issued_total": 8,
                 "prefetch_credit_limited_count": 1,
                 "prefetch_credit_materialized_count": 7,
+                "prefetch_plan_replace_count": 3,
+                "prefetch_plan_empty_replace_count": 0,
+                "prefetch_plan_candidate_count": 15,
+                "prefetch_plan_cleared_candidate_count": 8,
             },
         },
     ]
@@ -236,6 +247,11 @@ def test_percentile_and_aggregate_metrics():
     assert aggregate["prefetch_credit_issued_total"] == 16
     assert aggregate["prefetch_credit_limited_count_total"] == 2
     assert aggregate["prefetch_credit_materialized_count_total"] == 15
+    assert aggregate["prefetch_plan_replace_count_total"] == 5
+    assert aggregate["prefetch_plan_empty_replace_count_total"] == 1
+    assert aggregate["prefetch_plan_candidate_count_total"] == 23
+    assert aggregate["prefetch_plan_cleared_candidate_count_total"] == 12
+    assert aggregate["cache_prefetch_count_total"] == 3
 
 
 def test_dispatcher_stats_dict_accepts_legacy_and_extended_payloads():

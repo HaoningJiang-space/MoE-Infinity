@@ -531,6 +531,30 @@ def aggregate_request_records(
         )
         for record in request_records
     ]
+    prefetch_plan_replace_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_plan_replace_count", 0))
+        for record in request_records
+    ]
+    prefetch_plan_empty_replace_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_plan_empty_replace_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    prefetch_plan_candidate_counts = [
+        int(record.get("prefetcher_stats", {}).get("prefetch_plan_candidate_count", 0))
+        for record in request_records
+    ]
+    prefetch_plan_cleared_candidate_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_plan_cleared_candidate_count", 0
+            )
+        )
+        for record in request_records
+    ]
     pressure_locked_max_values = [
         int(record.get("prefetcher_stats", {}).get("pressure_locked_max", 0))
         for record in request_records
@@ -557,6 +581,10 @@ def aggregate_request_records(
         float(record.get("cache_hit_rate_delta", {}).get("overall_hit_rate", 0.0))
         for record in request_records
         if "cache_hit_rate_delta" in record
+    ]
+    cache_prefetch_count_deltas = [
+        int(record.get("cache_hit_rate_delta", {}).get("prefetch_count", 0))
+        for record in request_records
     ]
 
     request_count = len(request_records)
@@ -631,6 +659,16 @@ def aggregate_request_records(
         ),
         "prefetch_credit_materialized_count_total": int(
             sum(prefetch_credit_materialized_counts)
+        ),
+        "prefetch_plan_replace_count_total": int(sum(prefetch_plan_replace_counts)),
+        "prefetch_plan_empty_replace_count_total": int(
+            sum(prefetch_plan_empty_replace_counts)
+        ),
+        "prefetch_plan_candidate_count_total": int(
+            sum(prefetch_plan_candidate_counts)
+        ),
+        "prefetch_plan_cleared_candidate_count_total": int(
+            sum(prefetch_plan_cleared_candidate_counts)
         ),
         "prefetch_admit_rate": (
             float(prefetch_admitted_count_total / prefetch_candidate_count_total)
@@ -723,6 +761,7 @@ def aggregate_request_records(
             if cache_hit_rates
             else 0.0
         ),
+        "cache_prefetch_count_total": int(sum(cache_prefetch_count_deltas)),
     }
 
 
@@ -793,15 +832,15 @@ def render_markdown_summary(
             [
                 f"## Trace: `{trace_name}`",
                 "",
-                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | p50 latency (s) | p95 latency (s) | tok/s | mean enqueue | mean busy waits | mean evictions | mean all-locked | mean no-victim wait us | mean pending wait us | mean pending stalls | prefetch drop | cap drop | pressure drop | credit skip | credit issued | credit materialized | plan replace | empty replace | completed prefetch | admit rate | pressure drop rate | under pressure | conflict | locked max | evict min | mean cache hit rate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         current = trace_results[trace_name]
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
+                "| {variant} | {p50:.4f} | {p95:.4f} | {tps:.3f} | {enqueue:.1f} | {busy:.1f} | {evict:.1f} | {all_locked:.2f} | {no_victim_us:.1f} | {pending_wait_us:.1f} | {pending_stalls:.2f} | {prefetch_drop} | {cap_drop} | {pressure_drop} | {credit_skip} | {credit_issued} | {credit_materialized} | {plan_replace} | {empty_replace} | {completed_prefetch} | {admit_rate:.4f} | {pressure_drop_rate:.4f} | {under_pressure} | {conflict} | {locked_max} | {evict_min} | {hit:.4f} |".format(
                     variant=variant,
                     p50=agg["latency_p50_s"],
                     p95=agg["latency_p95_s"],
@@ -830,6 +869,12 @@ def render_markdown_summary(
                         "prefetch_credit_materialized_count_total",
                         0,
                     ),
+                    plan_replace=agg.get("prefetch_plan_replace_count_total", 0),
+                    empty_replace=agg.get(
+                        "prefetch_plan_empty_replace_count_total",
+                        0,
+                    ),
+                    completed_prefetch=agg.get("cache_prefetch_count_total", 0),
                     admit_rate=agg.get("prefetch_admit_rate", 0.0),
                     pressure_drop_rate=agg.get("prefetch_pressure_drop_rate", 0.0),
                     under_pressure=agg.get(

@@ -263,19 +263,19 @@ def _write_summary(case_names: List[str]) -> None:
         f"- Device memory ratio: `{DEVICE_MEMORY_RATIO}`",
         f"- Phase-A events: `{str(PHASEA_EVENTS).lower()}`",
         "",
-        "| Case | status | tok/s | mean ms/token | p95 ms/token | library queries | candidates | admitted | drops | credit skip | credit issued | credit materialized | no-victim | all-locked | pending stall |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Case | status | tok/s | mean ms/token | p95 ms/token | library queries | candidates | admitted | drops | plan replaces | empty replaces | plan cleared | completed prefetch | credit skip | credit issued | credit materialized | no-victim | all-locked | pending stall |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in results:
         if result.get("missing"):
             lines.append(
-                f"| {result['case']} | missing | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |"
+                f"| {result['case']} | missing | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |"
             )
             continue
         aggregate = result.get("aggregate", {})
         status = "failed" if result.get("failed") else "complete"
         lines.append(
-            "| {case} | {status} | {tps:.3f} | {mean_ms:.2f} | {p95_ms:.2f} | {queries} | {candidates} | {admitted} | {drops} | {credit_skip} | {credit_issued} | {credit_materialized} | {no_victim} | {all_locked} | {pending_stall} |".format(
+            "| {case} | {status} | {tps:.3f} | {mean_ms:.2f} | {p95_ms:.2f} | {queries} | {candidates} | {admitted} | {drops} | {plan_replace} | {empty_replace} | {plan_cleared} | {completed_prefetch} | {credit_skip} | {credit_issued} | {credit_materialized} | {no_victim} | {all_locked} | {pending_stall} |".format(
                 case=result["case"],
                 status=status,
                 tps=float(aggregate.get("generated_tokens_per_second", 0.0)),
@@ -289,6 +289,16 @@ def _write_summary(case_names: List[str]) -> None:
                 candidates=int(aggregate.get("prefetch_candidate_count_total", 0)),
                 admitted=int(aggregate.get("prefetch_admitted_count_total", 0)),
                 drops=int(aggregate.get("prefetch_drop_count_total", 0)),
+                plan_replace=int(
+                    aggregate.get("prefetch_plan_replace_count_total", 0)
+                ),
+                empty_replace=int(
+                    aggregate.get("prefetch_plan_empty_replace_count_total", 0)
+                ),
+                plan_cleared=int(
+                    aggregate.get("prefetch_plan_cleared_candidate_count_total", 0)
+                ),
+                completed_prefetch=int(aggregate.get("cache_prefetch_count_total", 0)),
                 credit_skip=int(
                     aggregate.get("prefetch_credit_skip_count_total", 0)
                 ),
@@ -316,6 +326,8 @@ def _write_summary(case_names: List[str]) -> None:
             "",
             "- `cap0_skip_generation` isolates the control-plane tax of dropped speculation.",
             "- `cap8_credit_gated_generation` tests whether upstream credits reduce candidate materialization without losing progress.",
+            "- `plan replaces` and `empty replaces` expose the queue-replacement side effect of direct-cache prefetch.",
+            "- `completed prefetch` comes from the runtime hit-rate tensor and is the lower-bound signal for actual prefetch lifecycle progress.",
             "- This is an overhead-decomposition run, not a final performance sweep.",
             "",
         ]

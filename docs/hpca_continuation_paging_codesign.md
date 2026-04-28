@@ -14,8 +14,8 @@
 
 更准确的新主线是：
 
-> 内存超配 MoE 推理缺的不是又一个预测器，也不只是普通的 prefetch throttling。  
-> MoE expert 是一种特殊 page：大粒度、layer-deadline、执行期带锁、候选来自 speculative routing，而且 demand miss 会阻塞 decode critical path。  
+> 内存超配 MoE 推理缺的不是又一个预测器，也不只是普通的 prefetch throttling。
+> MoE expert 是一种特殊 page：大粒度、layer-deadline、执行期带锁、候选来自 speculative routing，而且 demand miss 会阻塞 decode critical path。
 > 因此，普通 UVM / cache prefetch 语义不足，需要 MoE-specific expert paging semantics。
 
 换成大白话：
@@ -31,7 +31,7 @@
 
 但要注意：
 
-> `progress-guaranteed` 不是自动 non-incremental。  
+> `progress-guaranteed` 不是自动 non-incremental。
 > 真正的新意不是“prefetch 会污染 cache”或“demand 应该优先”，而是 MoE expert page fault 的语义和通用 UVM/page prefetch 不一样。
 
 `continuation cache` 仍然重要，但它应该降级为上层 hint source / retrieval abstraction；真正的 HPCA 核心贡献应放到底层 paging 语义和 memory hierarchy co-design。
@@ -59,7 +59,7 @@
 
 所以非 incremental 的边界必须非常清楚：
 
-> 我们不是提出一个更准的 predictor，也不是一个更聪明的 eviction policy。  
+> 我们不是提出一个更准的 predictor，也不是一个更聪明的 eviction policy。
 > 我们提出 MoE expert paging 的体系结构语义：expert 是 deadline-bearing、lock-constrained、large-object page；speculative expert traffic 的 admission 必须同时考虑 evictability、lock state、layer deadline 和 demand reserve。
 
 ---
@@ -130,7 +130,7 @@ v10 fixed-length pressure sweep 的已完成部分显示：
 
 这说明：
 
-> `ratio_045/060` 不是强 paging-pressure 点。  
+> `ratio_045/060` 不是强 paging-pressure 点。
 > 它们适合当 control，不适合证明 paging bottleneck 或 prefetch 在压力下有效。
 
 当前 partial 分析报告：
@@ -151,7 +151,7 @@ v10b strong-pressure run 的关键现象：
 
 它说明：
 
-> demand fetch 需要 cache slot，但当前 evictable candidate set 暂时为空。  
+> demand fetch 需要 cache slot，但当前 evictable candidate set 暂时为空。
 > 当前 runtime 只等一次，然后把“暂时没有 victim”当成不可恢复错误。
 
 v13 用同类长运行配置重跑，并带上了新的 dispatcher counters：
@@ -166,7 +166,7 @@ v13 用同类长运行配置重跑，并带上了新的 dispatcher counters：
 
 v13 使结论更克制，也更强：
 
-> 强 pressure 下的问题不只是 fatal。  
+> 强 pressure 下的问题不只是 fatal。
 > speculative expert traffic 会显著增加 miss/evict，并可能把 decode 推入 non-progress 状态；表现可以是 v10b 的 fatal，也可以是 v13 的长期 stall。
 
 v15 在 progress loop patch 后重跑同类 aggressive boundary：
@@ -188,8 +188,8 @@ v17 修正 pending-stall guard 后，用 60s timeout targeted 复现 local bound
 
 v17 的含义要克制解释：
 
-> 这不是最终修复。  
-> 它只说明 runtime 已经从 fatal / silent stall 前进到可诊断的 progress failure。  
+> 这不是最终修复。
+> 它只说明 runtime 已经从 fatal / silent stall 前进到可诊断的 progress failure。
 > 真正的下一步是 prefetch admission / demand reserve / drop-defer，而不是继续调 predictor。
 
 v18 在同一类 targeted boundary 上打开第一版 prefetch admission，但仍然失败：
@@ -282,6 +282,126 @@ v21 的结论：
 
 注意：v21 使用双 GPU 并行跑 cap sweep，因此 tok/s 只能作为粗略参考；progress / stall / admission counters 才是这批结果的主证据。
 
+v22 用单 GPU sequential rerun 把 `cap8` 从 robustness 证据推进到性能 tradeoff 证据：
+
+- root: `/data/ziheng/moe_infinity_fgo_runs/phasea_v22_sequential_cap_perf`
+- trace/variant: `mixed / history_reuse_local_backbone`
+- pressure: `device_memory_ratio=0.30`, `future_layers=4`, `max_candidates=32`
+- `cap0`: complete, `1.096 tok/s`, `admit_rate=0`, `drop_cap=348892`, `no_victim=0`, `all_locked=0`
+- `cap4`: complete, `1.046 tok/s`, `admit_rate=0.1348`, `no_victim=0`, `all_locked=0`
+- `cap8`: complete, `1.188 tok/s`, `admit_rate=0.2694`, `no_victim=0`, `all_locked=0`
+- `cap12`: complete, `1.171 tok/s`, `admit_rate=0.3988`, `no_victim=0`, `all_locked=0`
+- `cap16_probe`: failed, `admit_rate=0.5271`, `no_victim=3157`, `all_locked=3157`, `progress_stall=1`
+
+v22 的直接结论：
+
+> `cap8` 是当前最干净的 safe-window point，但相对 `cap0` 只有约 8% 吞吐提升。
+> 这说明 hard cap 可以恢复 progress，但还不是最终机制。
+
+更重要的是，v22 暴露了一个新的控制面问题：
+
+> `cap0` 不是 no-prefetch baseline。
+> 它仍然在 decode critical path 上做 local continuation lookup、candidate generation、ranking、admission、counter/logging，然后把所有 candidates drop。
+
+因此，`drop prefetch != free`。当前实现是：
+
+> generate speculative candidates first, then drop/admit.
+
+更合理的机制应该是：
+
+> paging substrate 先给 speculation credit；没有 credit 就不生成 optional speculative work。
+
+这把主线从“调 cap”推进到 `Credit-Gated Transactional Expert Paging`：
+
+- credit-gated: 没有 evictability/bandwidth/deadline credit，就不 materialize prefetch candidates。
+- transactional: prefetched expert 不能直接变成 committed cache state；它应该先处于可撤销 speculative state，只有 demand 使用后才 commit。
+
+当前已实现 v23 的第一步：
+
+- `prefetch_credit_gated_enabled`
+- `prefetch_credit_count`
+- `credit=0` 时只做 `update_only`，跳过 `update_and_score`、ranking 和 admission。
+- `credit>0` 时只 materialize credit 数量以内的 prefetch candidates。
+- 新 counter: `prefetch_credit_skip_count`, `prefetch_credit_issued_total`, `prefetch_credit_materialized_count`。
+
+v23 的目标不是先证明最终速度，而是做 overhead decomposition：
+
+- `on_demand`
+- `cap0_generate_then_drop`
+- `cap0_skip_generation`
+- `cap8_generate_then_drop`
+- `cap8_credit_gated_generation`
+
+如果 `cap0_skip_generation` 明显快于 `cap0_generate_then_drop`，就能证明：
+
+> dropped speculation still consumes critical-path control resources.
+
+如果 `cap8_credit_gated_generation` 快于 `cap8_generate_then_drop`，就能证明：
+
+> speculation throttling must move upstream before candidate materialization.
+
+### 4. prefetch lifecycle 语义还没有完全证明
+
+代码路径还暴露了一个必须单独记录的问题：
+
+```text
+drive_expert_policy
+-> update_and_score
+-> prefetch_experts
+-> rank_prefetch_candidates
+-> _admit_prefetch_tensor_ids
+-> replace_cache_candidates(admitted)
+-> enqueue_prefetch(admitted)
+```
+
+`replace_cache_candidates` 在 C++ 里的语义不是普通 append：
+
+- 清空 `candidates_`
+- 插入新的 admitted candidates
+- 清空所有 priority>0 的 prefetch queue
+
+因此：
+
+> `cap0` / `cap8` 的当前语义不是单纯 prefetch cap，而是 bounded admission + plan replacement/cancellation。
+
+这会影响对结果的解释：
+
+- `cap0_generate_then_drop` 每层都会 `replace_cache_candidates([])`，也就是清空旧 prefetch plan。
+- `cap8_generate_then_drop` 每层会用新的 admitted set 替换旧 plan，旧 queue 可能来不及完成就被清掉。
+- 这可能解释为什么 prefetch 吞吐收益不明显：plan replacement 太频繁，prefetch lifecycle 很短。
+
+因此后续 summary 必须额外记录：
+
+- `prefetch_plan_replace_count`
+- `prefetch_plan_empty_replace_count`
+- `prefetch_plan_candidate_count`
+- `prefetch_plan_cleared_candidate_count`
+- `cache_prefetch_count_total`
+
+这些 counter 的含义：
+
+- plan replace: runtime 收到多少次新 prefetch plan。
+- empty replace: 多少次用空 plan 清掉旧 prefetch queue。
+- plan cleared: replacement 之前还有多少 plan candidates 被覆盖。
+- completed prefetch: runtime hit-rate tensor 里完成过的 prefetch 次数，是 prefetch lifecycle 的低成本下界信号。
+
+当前还缺的更强 lifecycle counter：
+
+- prefetch issued
+- prefetch completed
+- prefetch canceled by replacement
+- prefetch used before deadline
+- prefetch late
+- prefetch unused / expired
+
+在这些 counter 补齐之前，论文里不能过度声称：
+
+> cap8 的收益来自 useful prefetch。
+
+更稳的说法是：
+
+> cap8 恢复了 progress，并在当前实现下给出有限性能收益；下一步要分离 control-plane tax、plan cancellation 和 true prefetch utility。
+
 这正是 HPCA 切入口：
 
 - 当前系统把 expert cache 当成普通软件缓存。
@@ -309,7 +429,7 @@ v21 的结论：
 
 我们的 HPCA 版本要主打第 3 点，并把前两点连接起来：
 
-> 当 retrieval object 从 sequence-level 改成 local continuation 后，candidate omission 被缓解，但更激进、更局部的 prefetch 会把系统推向新的瓶颈：expert evictability、execution lock state、layer deadline、demand reserve 和 no-victim progress。  
+> 当 retrieval object 从 sequence-level 改成 local continuation 后，candidate omission 被缓解，但更激进、更局部的 prefetch 会把系统推向新的瓶颈：expert evictability、execution lock state、layer deadline、demand reserve 和 no-victim progress。
 > 因此，需要 MoE-specific expert paging semantics，而不是简单复用普通 UVM/prefetch 语义。
 
 ---
@@ -399,7 +519,7 @@ v10b 证明更 aggressive 的 local hint 会暴露底层 paging progress 问题�
 
 这两个证据要连起来：
 
-> 上层 retrieval object 修对之后，系统不是结束了，而是把 bottleneck 推到底层 expert paging substrate。  
+> 上层 retrieval object 修对之后，系统不是结束了，而是把 bottleneck 推到底层 expert paging substrate。
 > 这就是为什么本文不是 predictor paper，而是 memory hierarchy contract paper。
 
 ---
@@ -412,8 +532,8 @@ v10b 证明更 aggressive 的 local hint 会暴露底层 paging progress 问题�
 
 中文版本：
 
-> 现有 MoE offloading 系统主要优化 expert prediction 和 scheduling，但缺少 speculative expert traffic 的 paging contract。  
-> 我们证明，在强 memory pressure 下，即使预测是对的，也可能破坏 progress，因为 MoE expert 是大对象、执行期带锁、并受 layer deadline 约束。  
+> 现有 MoE offloading 系统主要优化 expert prediction 和 scheduling，但缺少 speculative expert traffic 的 paging contract。
+> 我们证明，在强 memory pressure 下，即使预测是对的，也可能破坏 progress，因为 MoE expert 是大对象、执行期带锁、并受 layer deadline 约束。
 > 我们提出 MoE-specific expert paging substrate：evictability-aware admission、lock-aware expert metadata、可取消的 deadline-bearing prefetch descriptor，以及 demand-reserved capacity。
 
 ---
@@ -891,8 +1011,8 @@ victim：
 
 更稳的 HPCA 版本是：
 
-> MoE expert paging needs MoE-specific memory hierarchy semantics.  
-> An expert miss is a large-object, layer-deadline, lock-constrained, speculation-fed page fault.  
+> MoE expert paging needs MoE-specific memory hierarchy semantics.
+> An expert miss is a large-object, layer-deadline, lock-constrained, speculation-fed page fault.
 > Continuation cache shows how to generate better local hints, but strong memory pressure exposes a deeper substrate problem: speculative expert traffic must be admitted based on evictability, lock state, deadline, and demand reserve.
 
 中文一句话：

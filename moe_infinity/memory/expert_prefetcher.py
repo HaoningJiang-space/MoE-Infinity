@@ -52,7 +52,12 @@ class ExpertPrefetcher(object):
             "prefetch_credit_issued_total": 0,
             "prefetch_credit_limited_count": 0,
             "prefetch_credit_materialized_count": 0,
+            "prefetch_plan_replace_count": 0,
+            "prefetch_plan_empty_replace_count": 0,
+            "prefetch_plan_candidate_count": 0,
+            "prefetch_plan_cleared_candidate_count": 0,
         }
+        self._last_prefetch_plan_candidate_count = 0
 
     def prefetch_runtime_stats(self):
         stats = dict(self._prefetch_runtime_stats)
@@ -179,13 +184,26 @@ class ExpertPrefetcher(object):
         stats = self._prefetch_runtime_stats
         stats["prefetch_credit_skip_count"] += 1
 
+    def _replace_prefetch_plan(self, tensor_ids):
+        stats = self._prefetch_runtime_stats
+        candidate_count = len(tensor_ids)
+        stats["prefetch_plan_replace_count"] += 1
+        stats["prefetch_plan_candidate_count"] += candidate_count
+        stats["prefetch_plan_cleared_candidate_count"] += int(
+            getattr(self, "_last_prefetch_plan_candidate_count", 0)
+        )
+        if candidate_count == 0:
+            stats["prefetch_plan_empty_replace_count"] += 1
+        self._last_prefetch_plan_candidate_count = candidate_count
+        self.archer_engine.replace_cache_candidates(tensor_ids)
+
     def prefetch_experts_list(self, layer_id, expert_list):
         tensor_ids = []
         for j in expert_list:
             tensor_ids.append(self.expert_tensor_map[(layer_id, j)])
         admitted_tensor_ids = self._admit_prefetch_tensor_ids(tensor_ids)
         if bool(getattr(self, "prefetch_admission_enabled", False)):
-            self.archer_engine.replace_cache_candidates(admitted_tensor_ids)
+            self._replace_prefetch_plan(admitted_tensor_ids)
         for tensor_id in admitted_tensor_ids:
             gpu_id = self.archer_engine.get_node_default_device([tensor_id])
             self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
@@ -242,7 +260,7 @@ class ExpertPrefetcher(object):
         ]
         assert len(np.unique(tensor_ids)) == len(tensor_ids)
         admitted_tensor_ids = self._admit_prefetch_tensor_ids(tensor_ids)
-        self.archer_engine.replace_cache_candidates(admitted_tensor_ids)
+        self._replace_prefetch_plan(admitted_tensor_ids)
         for tensor_id in admitted_tensor_ids:
             gpu_id = self.archer_engine.get_node_default_device([tensor_id])
             self.archer_engine.enqueue_prefetch(tensor_id, gpu_id)
