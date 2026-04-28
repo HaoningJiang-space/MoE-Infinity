@@ -1,6 +1,6 @@
 # Continuation Cache Research Positioning
 
-Date: 2026-04-27
+Date: 2026-04-28
 
 ## 一句话主张
 
@@ -161,15 +161,20 @@ Continuation Cache for MoE Expert Paging
   - 对比 sequence object + simple/topk/consensus/recent-retrieval controller。
   - 对比 local continuation + simple ranking。
   - 结论是 object change 比 controller refinement 更关键。
-- v10 runtime fixed-length pressure sweep 正在跑:
+- v10 runtime fixed-length pressure sweep 已完成 `ratio_045/060`:
   - 固定生成长度，消除 EOS early stop 干扰。
-  - 扫 device memory ratio，制造更强 paging pressure。
-  - 目标是证明 continuation cache 不只是 observation artifact，而能改善 runtime。
+  - `ratio_045/060` 全部是 `non-pressure/control`：hit rate 约 `1.0`，busy wait 为 `0`。
+  - 这批结果适合做 control，不适合证明 paging pressure。
 - v10b runtime strong pressure sweep 暴露 robustness boundary:
   - 在 GPU0 上补 `device_memory_ratio=0.30/0.25`。
   - 只保留 `on_demand`、`history_reuse_consensus_backbone`、`history_reuse_local_backbone`。
   - `ratio_030 + future_layers=4 + max_candidates=32` 在 `mixed / history_reuse_local_backbone` 触发 no-victim / all-locked fatal。
   - 这个结果不能作为正常性能点，但可以作为强 memory pressure 下 runtime progress bug 的 robustness evidence。
+- v15/v17 进一步把 robustness boundary 固化成 progress failure 证据:
+  - v15：同类 aggressive boundary 下，`on_demand` 和 `consensus` 完成，`local` 进入 all-locked/no-victim 循环，被人工 `SIGTERM`。
+  - v17：修正 pending-stall guard 后，`local` 自动抛出 `WaitHiddenStates progress stall`。
+  - 关键诊断是 `pending=1`, `no_victim_wait=613`, `idle_us=60003517`。
+  - 这说明当前还不是最终修复，而是把 fatal/silent stall 推进成可诊断 failure。
 
 ### 第二阶段：增强方向
 
@@ -238,8 +243,9 @@ Geometry-aware continuation retrieval
 
 优先补：
 
-- 等 `v10` fixed-length pressure sweep 完整跑完。
-- 汇总 `ratio_060/045/035` 下的 `ms/token`、p95 latency、busy wait、cache hit、Phase-A same-step M32 recall / omission gap。
+- 把 `v10 ratio_045/060` 明确写成 control，不再当 pressure 证据。
+- 后续正常 performance sweep 只使用不崩溃、可重复的 pressure 点。
+- 汇总稳定 pressure 点下的 `ms/token`、p95 latency、busy wait、cache hit、Phase-A same-step M32 recall / omission gap。
 - 如果 `ratio_035` 稳定，再补一个 conservative strong-pressure 点：
   - `device_memory_ratio=0.30`
   - `prefetch_future_layers=2`
@@ -258,10 +264,10 @@ Geometry-aware continuation retrieval
 
 软件侧需要补：
 
-- demand fetch: `wait once then fatal` 改为 `while no victim -> wait/recheck`。
-- prefetch: no-victim 或 cache-pressure 高时 drop/defer，不能和 demand fetch 平权抢 cache。
-- victim selection: `FindExpertEvict()` 要么持锁到 eviction 完成，要么 eviction 前重新校验。
-- diagnostics: 记录 all-locked event、no-victim wait time、prefetch drop/defer count、demand-vs-prefetch conflict count。
+- demand fetch: 已从 `wait once then fatal` 推进到 `while no victim -> wait/recheck`，并能触发 bounded progress-stall 诊断。
+- prefetch: 仍需实现 no-victim 或 cache-pressure 高时 drop/defer，不能和 demand fetch 平权抢 cache。
+- victim selection: 已加入 victim lock ownership 的第一版修复，但还要继续用实验验证。
+- diagnostics: 已有 all-locked/no-victim/pending-stall，仍缺 prefetch drop/defer、demand-vs-prefetch conflict、locked/evictable snapshot。
 
 实验侧需要分开：
 
@@ -271,7 +277,8 @@ Geometry-aware continuation retrieval
 robustness boundary 的用途：
 
 - 证明强 pressure 下当前 runtime 会进入 all-locked / no-victim 区间。
-- 证明 progress fix 后不再 fatal，只表现为可计量的 wait/drop/defer。
+- 证明 progress guard 后不再 silent/fatal，而是结构化 `progress stall`。
+- 后续 admission 修复要证明它进一步变成可完成或可控 drop/defer。
 - 给 HPCA 方向提供 demand/prefetch priority、reserved slots、evictable metadata 的动机。
 
 ### C. HPCA / co-design 补充

@@ -1,6 +1,6 @@
 # HPCA 方向：面向内存超配 MoE 推理的 MoE-Specific Expert Paging
 
-日期：2026-04-27
+日期：2026-04-28
 
 ## 核心转向
 
@@ -118,24 +118,26 @@ v9 是目前最干净的 object-vs-controller 证据：
 
 > 先换 retrieval object，比继续调 controller 更重要。
 
-### 2. v10 目前说明 ratio_060 是 control 点
+### 2. v10 说明 ratio_045/060 都是 control 点
 
-v10 fixed-length pressure sweep 正在跑。当前已完成的 `ratio_060` 部分显示：
+v10 fixed-length pressure sweep 的已完成部分显示：
 
+- `ratio_045` 和 `ratio_060` 都完成。
 - cache hit rate 基本都是 `1.0`。
 - busy wait 是 `0`。
 - 已完成 case 都被标记为 `non-pressure/control`。
+- 这些 case 使用的是旧 rebuild，dispatcher pressure counters 不完整，因此只能当 control，不适合作为 pressure 证据。
 
 这说明：
 
-> `ratio_060` 不是强 paging-pressure 点。  
-> 它适合当 control，不适合证明 paging bottleneck 或 prefetch 在压力下有效。
+> `ratio_045/060` 不是强 paging-pressure 点。  
+> 它们适合当 control，不适合证明 paging bottleneck 或 prefetch 在压力下有效。
 
 当前 partial 分析报告：
 
 - `/data/ziheng/moe_infinity_fgo_runs/phasea_v10_runtime_fixedlen_qwen_pressure_sweep/analysis/pressure_sweep_summary.md`
 
-### 3. v10b/v13 暴露了第二层问题：runtime progress
+### 3. v10b/v13/v15/v17 暴露了第二层问题：runtime progress
 
 v10b strong-pressure run 的关键现象：
 
@@ -166,6 +168,29 @@ v13 使结论更克制，也更强：
 
 > 强 pressure 下的问题不只是 fatal。  
 > speculative expert traffic 会显著增加 miss/evict，并可能把 decode 推入 non-progress 状态；表现可以是 v10b 的 fatal，也可以是 v13 的长期 stall。
+
+v15 在 progress loop patch 后重跑同类 aggressive boundary：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v15_progress_patch_boundary`
+- 配置：`ratio=0.30`, `future_layers=4`, `max_candidates=32`, `warmup=2`, `measured=32`
+- `on_demand` 完成：`9.150 tok/s`, miss `4366`, eviction `1915`
+- `history_reuse_consensus_backbone` 完成但极慢：`1.150 tok/s`, miss `9395`, eviction `3949`
+- `history_reuse_local_backbone` 进入 all-locked / no-victim 循环，被人工 `SIGTERM` 结束
+- local log 中 `All cached expert locked` 出现 `3499` 次
+
+v17 修正 pending-stall guard 后，用 60s timeout targeted 复现 local boundary：
+
+- root：`/data/ziheng/moe_infinity_fgo_runs/phasea_v17_progress_guard_local_timeout`
+- 配置：`mixed / history_reuse_local_backbone`, `ratio=0.30`, `future_layers=4`, `max_candidates=32`
+- 结果：exit code `1`，不再需要人工 kill
+- 错误：`ExpertDispatcher::WaitHiddenStates progress stall`
+- 关键诊断：`pending=1`, `enqueue=2137`, `fetch_dequeue=230`, `exec_dequeue=2136`, `output=2136`, `eviction=55`, `no_victim_wait=613`, `idle_us=60003517`
+
+v17 的含义要克制解释：
+
+> 这不是最终修复。  
+> 它只说明 runtime 已经从 fatal / silent stall 前进到可诊断的 progress failure。  
+> 真正的下一步是 prefetch admission / demand reserve / drop-defer，而不是继续调 predictor。
 
 这正是 HPCA 切入口：
 
@@ -573,6 +598,8 @@ runtime 需要看到这些状态：
 
 - v12 短 canary：所有 case 完成，没有 no-victim/all-locked，但 miss/evict 非零，说明它是中等 pressure sanity point。
 - v13 长 boundary：on-demand 完成，consensus 完成但 miss/evict 和 latency 明显上升，local 进入 progress stall。
+- v15 长 boundary：on-demand 和 consensus 完成，local aggressive 进入 no-victim/all-locked 循环并被人工终止。
+- v17 targeted boundary：local aggressive 自动抛出 `WaitHiddenStates progress stall`，把 silent/fatal failure 转成结构化诊断。
 
 ### Stage 3：修 progress bug
 
@@ -583,6 +610,12 @@ runtime 需要看到这些状态：
 3. prefetch 在 no-victim/high-pressure 下 drop/defer。
 4. victim selection 做 lock ownership 或 revalidation。
 5. 所有 drop/defer/wait/conflict 都进 raw JSON 和 summary。
+
+当前状态：
+
+- 第 1/2/4 步已经有第一版实现，并在 v17 中证明能诊断 progress stall。
+- 第 3/5 步还没闭环，是下一阶段最重要的代码工作。
+- 现在不能把 v17 说成 progress guarantee，只能说是 progress guard / failure characterization。
 
 验收标准：
 

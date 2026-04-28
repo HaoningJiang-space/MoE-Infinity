@@ -1,6 +1,6 @@
 # Deployment-Oriented Routing Directions for MoE Inference
 
-Date: 2026-04-27
+Date: 2026-04-28
 
 ## 目的
 
@@ -114,12 +114,20 @@ Date: 2026-04-27
   - omission gap 约从 `0.68–0.74` 降到 `0.49–0.50`
 
 - `v10 runtime pressure sweep`
-  - 当前正在验证 local continuation object 的 candidate 优势能否在真实 paging 压力下转成 runtime 收益
+  - 已完成的 `ratio_045/060` 都是 `non-pressure/control`
+  - hit rate 约 `1.0`，busy wait 为 `0`
+  - 这批结果不能当 paging-pressure 证据
 
 - `v10b strong-pressure boundary`
   - `ratio_030 + future_layers=4 + max_candidates=32` 暴露了 expert cache eviction progress bug
   - failure mode 是 no-victim / all-locked 状态下 runtime fatal，不是 CUDA OOM
   - 这类结果应作为 robustness boundary，不应混入正常性能图表
+
+- `v15/v17 progress boundary`
+  - v15：on-demand 和 consensus 在 aggressive `ratio_030` 下完成，local aggressive 进入 no-victim/all-locked 循环，被人工终止
+  - v17：local aggressive 自动抛出 `WaitHiddenStates progress stall`
+  - 关键诊断：`pending=1`, `no_victim_wait=613`, `idle_us=60003517`
+  - 这说明当前已经有 progress guard，但还没有真正的 prefetch admission 修复
 
 ### 风险
 
@@ -155,19 +163,19 @@ Date: 2026-04-27
 
 短期不要发散到 router calibration 或 geometry retrieval。先把当前主线补完整：
 
-1. `v10` 正常性能 sweep 跑完并汇总。
-2. 增加 progress counters，把 v10b crash 变成可计量的 robustness boundary。
-3. 修 runtime progress bug，确保 no-victim / all-locked 不会 fatal。
+1. 把 `v10 ratio_045/060` 固化为正常 control，而不是 pressure 结论。
+2. 把 v15/v17 写成可计量 robustness boundary。
+3. 实现 prefetch admission，让 speculative prefetch 在 no-victim/high-pressure 下 drop/throttle。
 4. 用保守强压力配置补一组稳定 runtime：
    - `ratio_030`
    - `prefetch_future_layers=2`
    - `prefetch_max_candidates=16`
-5. 再补第二个模型，优先选已经在机器上的 `DeepSeek-V2-Lite` 或 `OLMoE-1B-7B-0924`。
+5. admission 机制闭环后，再补第二个模型，优先选已经在机器上的 `DeepSeek-V2-Lite` 或 `OLMoE-1B-7B-0924`。
 
 判断标准：
 
 - 如果 local continuation 在 `0.60/0.45/0.35` 稳定降低 latency 或 busy wait，systems story 成立。
-- 如果 progress counters 显示 aggressive prefetch 会制造 no-victim / all-locked，而 drop/defer 后不 fatal，HPCA story 更强。
+- 如果 progress counters 显示 aggressive prefetch 会制造 no-victim / all-locked，而 admission/drop-defer 后 demand progress preserved，HPCA story 更强。
 - 如果第二个模型也出现 sequence object omission 高、local object recall 高，non-incremental claim 更稳。
 
 ### 当前判断
