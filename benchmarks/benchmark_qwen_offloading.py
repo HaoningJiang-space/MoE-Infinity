@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
+import numpy as np
 import torch
 from transformers import AutoTokenizer
 
@@ -66,6 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-input-length", type=int, default=128)
     parser.add_argument("--device-memory-ratio", type=float, default=0.6)
     parser.add_argument("--num-threads", type=int, default=1)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed Python, NumPy, and Torch before model construction.",
+    )
     parser.add_argument("--library-capacity", type=int, default=32)
     parser.add_argument("--library-metric", default="cosine")
     parser.add_argument("--library-similarity-mode", default="prefix_mean")
@@ -225,6 +233,14 @@ def _snapshot_dispatcher_stats(dispatcher: Any) -> Dict[str, int]:
     return dispatcher_stats_dict(dispatcher.get_runtime_stats())
 
 
+def _set_benchmark_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def _run_case(
     *,
     model_path: str,
@@ -239,6 +255,7 @@ def _run_case(
     max_input_length: int,
     device_memory_ratio: float,
     num_threads: int,
+    random_seed: int,
     library_capacity: int,
     library_metric: str,
     library_similarity_mode: str,
@@ -284,6 +301,7 @@ def _run_case(
         offload_cache_template=offload_cache_template,
         offload_cache_mode=offload_cache_mode,
     )
+    _set_benchmark_seed(random_seed)
     requests = load_chat_trace(trace_path)
     total_requests = warmup_requests + measured_requests
     if len(requests) < total_requests:
@@ -460,6 +478,7 @@ def _run_case(
                     "max_new_tokens": max_new_tokens,
                     "fixed_new_tokens": bool(fixed_new_tokens),
                     "max_input_length": max_input_length,
+                    "random_seed": int(random_seed),
                     "generation_kwargs": generation_kwargs,
                     "setup_timing": setup_timing,
                     "trace_preflight": trace_preflight,
@@ -558,6 +577,7 @@ def _run_case(
             "max_new_tokens": max_new_tokens,
             "fixed_new_tokens": bool(fixed_new_tokens),
             "max_input_length": max_input_length,
+            "random_seed": int(random_seed),
             "generation_kwargs": generation_kwargs,
             "setup_timing": setup_timing,
             "trace_preflight": trace_preflight,
@@ -630,7 +650,8 @@ def main() -> None:
                 max_input_length=args.max_input_length,
                 device_memory_ratio=args.device_memory_ratio,
                 num_threads=args.num_threads,
-                    library_capacity=args.library_capacity,
+                random_seed=args.seed,
+                library_capacity=args.library_capacity,
                     library_metric=args.library_metric,
                     library_similarity_mode=args.library_similarity_mode,
                     library_recent_window=args.library_recent_window,
