@@ -295,7 +295,7 @@ bool ArcherTaskPool::RemoveCachedSparseNode(const NodePtr& node,
     });
     for (auto i : node_index) {
       auto& n = device_nodes[i];
-      {
+      if (candidate_demand_eviction_protection_.load()) {
         std::lock_guard<std::mutex> lock(this->candidates_mutex_);
         if (candidates_.find(n) != candidates_.end() && !n->is_overflow) {
           continue;

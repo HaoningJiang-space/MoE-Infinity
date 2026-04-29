@@ -6,6 +6,7 @@
 
 v43-v47 之后，HPCA 方向需要更克制：
 
+- 最新实验审计见 `docs/phasea_experiment_audit_and_protocol.md`。后续 paper 证据以该审计里的 trust level 和 forward protocol 为准。
 - 不能再把当前 local-continuation runtime prefetch 当作正向加速机制。
 - v47 固定 forward 输入下，`history_reuse_local_backbone` 发出 `11008` 个 candidate/admit/enqueue，但只有约 `100` 个 prefetch resident hit，吞吐约为 baseline 的 `0.885x`。
 - `trace_similarity_prefetch` 当前 candidate/admit 为 `0`，不能作为有效 prefetch baseline。
