@@ -68,10 +68,26 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       gpu_overload_(kNumDevices()),
       exec_queue_(kNumDevices()),
       cached_experts_(kNumDevices()),
+      active_exec_layer_(kNumDevices()),
+      active_exec_expert_(kNumDevices()),
+      active_exec_start_us_(kNumDevices()),
+      active_fetch_layer_(kNumDevices()),
+      active_fetch_expert_(kNumDevices()),
+      active_fetch_stage_(kNumDevices()),
+      active_fetch_start_us_(kNumDevices()),
       modules_(kNumDevices(), nullptr) {
   main_thread_stop_flag_.store(false);
   for (auto& overload : gpu_overload_) {
     overload.store(false, std::memory_order_relaxed);
+  }
+  for (int gpu_id = 0; gpu_id < kNumDevices(); ++gpu_id) {
+    active_exec_layer_[gpu_id].store(-1, std::memory_order_relaxed);
+    active_exec_expert_[gpu_id].store(-1, std::memory_order_relaxed);
+    active_exec_start_us_[gpu_id].store(0, std::memory_order_relaxed);
+    active_fetch_layer_[gpu_id].store(-1, std::memory_order_relaxed);
+    active_fetch_expert_[gpu_id].store(-1, std::memory_order_relaxed);
+    active_fetch_stage_[gpu_id].store(0, std::memory_order_relaxed);
+    active_fetch_start_us_[gpu_id].store(0, std::memory_order_relaxed);
   }
 
   // module_ = new MoEMLP(dtype, expert_type);
@@ -149,6 +165,13 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       experts_[i][j]->expert_idx = i;
     }
   }
+}
+
+void ExpertDispatcher::SetExpectedQueue(int expected_pending) {
+  pending_.store(expected_pending);
+  current_expected_.store(static_cast<std::uint64_t>(expected_pending));
+  current_enqueued_.store(0);
+  current_output_.store(0);
 }
 
 ExpertDispatcher::~ExpertDispatcher() {
@@ -276,6 +299,7 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
   // input_queue_.push_back(std::move(args));
   num_enqueued_.fetch_add(1);
   enqueue_count_.fetch_add(1);
+  current_enqueued_.fetch_add(1);
 
   // auto& a = input_queue_.back();
   // if (expert_node->node->device.is_cuda()) {
@@ -344,6 +368,9 @@ void ExpertDispatcher::ResetRuntimeStats() {
   demand_candidate_protect_fallback_count_.store(0);
   candidate_resident_hit_count_.store(0);
   candidate_demand_miss_count_.store(0);
+  current_expected_.store(0);
+  current_enqueued_.store(0);
+  current_output_.store(0);
 }
 
 void ExpertDispatcher::RegisterExpert(
@@ -518,6 +545,11 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     int64_t layer_idx = args.layer_idx;
     int64_t expert_idx = args.expert_idx;
     int64_t batch_size = hidden_states_.size(0);
+    active_fetch_layer_[gpu_id].store(layer_idx, std::memory_order_release);
+    active_fetch_expert_[gpu_id].store(expert_idx, std::memory_order_release);
+    active_fetch_stage_[gpu_id].store(1, std::memory_order_release);
+    active_fetch_start_us_[gpu_id].store(MCIROSECONDS_SINCE_EPOCH,
+                                         std::memory_order_release);
 
     auto expert_node = experts_[expert_idx][layer_idx];
     bool cache_hit = expert_node->node->device.is_cuda();
@@ -560,6 +592,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                    cache_sizes_[gpu_id], " incache count ",
                    cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
                    " expert_idx ", expert_idx);
+        active_fetch_stage_[gpu_id].store(2, std::memory_order_release);
         {
           std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
           cache_cv_[gpu_id].wait(lock, [&] {
@@ -567,6 +600,10 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                    !gpu_overload_[gpu_id].load(std::memory_order_acquire);
           });
           if (main_thread_stop_flag_.load()) {
+            active_fetch_layer_[gpu_id].store(-1, std::memory_order_release);
+            active_fetch_expert_[gpu_id].store(-1, std::memory_order_release);
+            active_fetch_stage_[gpu_id].store(0, std::memory_order_release);
+            active_fetch_start_us_[gpu_id].store(0, std::memory_order_release);
             continue;
           }
           gpu_overload_[gpu_id].store(true, std::memory_order_release);
@@ -574,6 +611,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
         overload_fetch = true;
       } else {
         // find the expert in gpu and min incache_visit_count
+        active_fetch_stage_[gpu_id].store(3, std::memory_order_release);
         ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
         while (evict_expert_node == nullptr && !main_thread_stop_flag_.load()) {
           all_locked_event_count_.fetch_add(1);
@@ -630,6 +668,10 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
               "shutdown, gpu_id ",
               gpu_id, " cache size ", cache_sizes_[gpu_id],
               " in cache count ", cached_experts_[gpu_id].size());
+          active_fetch_layer_[gpu_id].store(-1, std::memory_order_release);
+          active_fetch_expert_[gpu_id].store(-1, std::memory_order_release);
+          active_fetch_stage_[gpu_id].store(0, std::memory_order_release);
+          active_fetch_start_us_[gpu_id].store(0, std::memory_order_release);
           continue;
         }
 
@@ -666,6 +708,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       cached_experts_[gpu_id].insert(key);
     }
 
+    active_fetch_stage_[gpu_id].store(4, std::memory_order_release);
     expert_node->node->SetDevice(device, true, stream);
     expert_node->node->incache_visit_count += 1;
     expert_node->SetTensorsFromBlob(device);
@@ -701,6 +744,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
     //            input.device().str(), "node ",
     //            expert_node->node->device.str());
     {
+      active_fetch_stage_[gpu_id].store(5, std::memory_order_release);
       ExecArgs exec_args;
       // exec_args.hidden_states = std::move(input);
       exec_args.expert_node = expert_node;
@@ -712,6 +756,10 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       // exec_queue_[gpu_id].emplace_back(std::move(exec_args));
       exec_queue_[gpu_id].Push(exec_args);
     }
+    active_fetch_layer_[gpu_id].store(-1, std::memory_order_release);
+    active_fetch_expert_[gpu_id].store(-1, std::memory_order_release);
+    active_fetch_stage_[gpu_id].store(0, std::memory_order_release);
+    active_fetch_start_us_[gpu_id].store(0, std::memory_order_release);
     // exec_cv_[gpu_id].notify_all();
   }
 
@@ -747,6 +795,11 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
     int64_t batch_size = hidden_states_.size(0);
     auto device = CUDA_DEVICE(gpu_id);
     auto expert_idx = args.expert_node->expert_idx;
+    active_exec_layer_[gpu_id].store(args.expert_node->layer_idx,
+                                     std::memory_order_release);
+    active_exec_expert_[gpu_id].store(expert_idx, std::memory_order_release);
+    active_exec_start_us_[gpu_id].store(MCIROSECONDS_SINCE_EPOCH,
+                                        std::memory_order_release);
 
     auto token_mask = router_mask_.index({"...", expert_idx});
     if (token_mask.device() != hidden_states_.device()) {
@@ -782,6 +835,9 @@ void ExpertDispatcher::GPUExecFunc(int gpu_id) {
 
     auto output = modules_[gpu_id]->forward(input, stream);
     OutputFunc(args, output, token_mask, gpu_id);
+    active_exec_layer_[gpu_id].store(-1, std::memory_order_release);
+    active_exec_expert_[gpu_id].store(-1, std::memory_order_release);
+    active_exec_start_us_[gpu_id].store(0, std::memory_order_release);
   }
 
   cudaStreamDestroy(stream);
@@ -879,10 +935,72 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
 
   // stream.synchronize();
   output_count_.fetch_add(1);
+  current_output_.fetch_add(1);
   pending_.fetch_sub(1);
   if (pending_.load() == 0) {
     pending_cv_.notify_all();
   }
+}
+
+std::string ExpertDispatcher::ActiveExecDebugString() const {
+  std::ostringstream oss;
+  for (size_t gpu_id = 0; gpu_id < active_exec_layer_.size(); ++gpu_id) {
+    auto layer_idx = active_exec_layer_[gpu_id].load(std::memory_order_acquire);
+    auto expert_idx = active_exec_expert_[gpu_id].load(std::memory_order_acquire);
+    if (layer_idx < 0 || expert_idx < 0) {
+      continue;
+    }
+    auto start_us = active_exec_start_us_[gpu_id].load(std::memory_order_acquire);
+    auto age_us = start_us == 0 ? 0 : MCIROSECONDS_SINCE_EPOCH - start_us;
+    oss << " gpu" << gpu_id << "=(layer=" << layer_idx
+        << ",expert=" << expert_idx << ",age_us=" << age_us << ")";
+  }
+  auto value = oss.str();
+  return value.empty() ? "none" : value;
+}
+
+std::string ExpertDispatcher::ActiveFetchDebugString() const {
+  auto stage_name = [](std::int64_t stage) {
+    switch (stage) {
+      case 1:
+        return "dequeued";
+      case 2:
+        return "overload_wait";
+      case 3:
+        return "evict";
+      case 4:
+        return "set_device";
+      case 5:
+        return "push_exec";
+      default:
+        return "idle";
+    }
+  };
+  std::ostringstream oss;
+  for (size_t gpu_id = 0; gpu_id < active_fetch_layer_.size(); ++gpu_id) {
+    auto layer_idx = active_fetch_layer_[gpu_id].load(std::memory_order_acquire);
+    auto expert_idx = active_fetch_expert_[gpu_id].load(std::memory_order_acquire);
+    auto stage = active_fetch_stage_[gpu_id].load(std::memory_order_acquire);
+    if (layer_idx < 0 || expert_idx < 0 || stage == 0) {
+      continue;
+    }
+    auto start_us = active_fetch_start_us_[gpu_id].load(std::memory_order_acquire);
+    auto age_us = start_us == 0 ? 0 : MCIROSECONDS_SINCE_EPOCH - start_us;
+    oss << " gpu" << gpu_id << "=(layer=" << layer_idx
+        << ",expert=" << expert_idx << ",stage=" << stage_name(stage)
+        << ",age_us=" << age_us << ")";
+  }
+  auto value = oss.str();
+  return value.empty() ? "none" : value;
+}
+
+std::string ExpertDispatcher::QueueDebugString() const {
+  std::ostringstream oss;
+  for (size_t gpu_id = 0; gpu_id < input_queue_.size(); ++gpu_id) {
+    oss << " gpu" << gpu_id << "=(input=" << input_queue_[gpu_id].Size()
+        << ",exec=" << exec_queue_[gpu_id].Size() << ")";
+  }
+  return oss.str();
 }
 
 std::vector<ExpertDispatcher::CallResult> ExpertDispatcher::Wait() {
@@ -947,7 +1065,12 @@ void ExpertDispatcher::WaitForPendingZero(const char* caller) {
                 fetch_dequeue_count_.load(), " exec_dequeue ",
                 exec_dequeue_count_.load(), " output ", output_count_.load(),
                 " eviction ", eviction_count_.load(), " no_victim_wait ",
-                no_victim_wait_count_.load());
+                no_victim_wait_count_.load(), " active_exec ",
+                ActiveExecDebugString(), " active_fetch ",
+                ActiveFetchDebugString(), " current_expected ",
+                current_expected_.load(), " current_enqueued ",
+                current_enqueued_.load(), " current_output ",
+                current_output_.load(), " queues ", QueueDebugString());
       last_log = now;
     }
     if (now - last_progress >= kStallTimeout) {
@@ -964,6 +1087,12 @@ void ExpertDispatcher::WaitForPendingZero(const char* caller) {
           << " output=" << output_count_.load()
           << " eviction=" << eviction_count_.load()
           << " no_victim_wait=" << no_victim_wait_count_.load()
+          << " active_exec=" << ActiveExecDebugString()
+          << " active_fetch=" << ActiveFetchDebugString()
+          << " current_expected=" << current_expected_.load()
+          << " current_enqueued=" << current_enqueued_.load()
+          << " current_output=" << current_output_.load()
+          << " queues=" << QueueDebugString()
           << " idle_us=" << idle_us;
       throw std::runtime_error(oss.str());
     }

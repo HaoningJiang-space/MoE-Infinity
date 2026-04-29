@@ -64,9 +64,7 @@ class ExpertDispatcher : public base::noncopyable {
                       const std::vector<std::uint32_t>& tensor_ids,
                       std::string jit_path);
   void ClearExpertCacheCounts();
-  void SetExpectedQueue(int expected_pending = 0) {
-    pending_.store(expected_pending);
-  }
+  void SetExpectedQueue(int expected_pending = 0);
   std::vector<std::uint64_t> GetRuntimeStats() const;
   void ResetRuntimeStats();
 
@@ -91,6 +89,8 @@ class ExpertDispatcher : public base::noncopyable {
   ExpertNodePtr FindExpertEvict(int gpu_id);
   void WaitForPendingZero(const char* caller);
   std::string ActiveExecDebugString() const;
+  std::string ActiveFetchDebugString() const;
+  std::string QueueDebugString() const;
 
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
@@ -131,9 +131,16 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> demand_candidate_protect_fallback_count_{0};
   std::atomic<std::uint64_t> candidate_resident_hit_count_{0};
   std::atomic<std::uint64_t> candidate_demand_miss_count_{0};
+  std::atomic<std::uint64_t> current_expected_{0};
+  std::atomic<std::uint64_t> current_enqueued_{0};
+  std::atomic<std::uint64_t> current_output_{0};
   std::vector<std::atomic<std::int64_t>> active_exec_layer_;
   std::vector<std::atomic<std::int64_t>> active_exec_expert_;
   std::vector<std::atomic<std::uint64_t>> active_exec_start_us_;
+  std::vector<std::atomic<std::int64_t>> active_fetch_layer_;
+  std::vector<std::atomic<std::int64_t>> active_fetch_expert_;
+  std::vector<std::atomic<std::int64_t>> active_fetch_stage_;
+  std::vector<std::atomic<std::uint64_t>> active_fetch_start_us_;
 
   std::atomic<size_t> pending_;
 

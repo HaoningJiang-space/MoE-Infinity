@@ -51,6 +51,11 @@ class ThreadSafeQueue : public base::noncopyable {
     return queue_.empty();
   }
 
+  size_t Size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
+  }
+
   void Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::queue<T> empty;
