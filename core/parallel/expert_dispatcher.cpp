@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 
 namespace {
@@ -196,11 +197,36 @@ void ExpertDispatcher::Enqueue(CallArgs& args) {
 
   if (!expert_node->node->mutex.try_lock()) {
     auto wait_start = std::chrono::steady_clock::now();
+    const auto kBusyNodeTimeout = PendingStallTimeout();
+    constexpr auto kBusyNodePollInterval = std::chrono::milliseconds(1);
     DLOG_WARN("ExpertDispatcher::Enqueue: waiting on busy expert node "
               "(expert_idx ",
               expert_idx, " layer_idx ", layer_idx, "node ",
               expert_node->node->str(), ")");
-    expert_node->node->mutex.lock();
+    while (!expert_node->node->mutex.try_lock()) {
+      auto now = std::chrono::steady_clock::now();
+      if (now - wait_start >= kBusyNodeTimeout) {
+        auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           now - wait_start)
+                           .count();
+        busy_wait_count_.fetch_add(1);
+        busy_wait_total_wait_us_.fetch_add(wait_us);
+        RecordAtomicMax(busy_wait_max_wait_us_,
+                        static_cast<std::uint64_t>(wait_us));
+        std::ostringstream oss;
+        oss << "ExpertDispatcher::Enqueue busy expert node timeout: expert_idx="
+            << expert_idx << " layer_idx=" << layer_idx
+            << " wait_us=" << wait_us
+            << " pending=" << pending_.load()
+            << " enqueue=" << enqueue_count_.load()
+            << " fetch_dequeue=" << fetch_dequeue_count_.load()
+            << " exec_dequeue=" << exec_dequeue_count_.load()
+            << " output=" << output_count_.load() << " node="
+            << expert_node->node->str();
+        throw std::runtime_error(oss.str());
+      }
+      std::this_thread::sleep_for(kBusyNodePollInterval);
+    }
     auto wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now() - wait_start)
                        .count();
