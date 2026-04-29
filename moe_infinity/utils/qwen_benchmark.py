@@ -40,6 +40,10 @@ QWEN_EXPERIMENTAL_BENCHMARK_VARIANTS = tuple(
 )
 
 
+def qwen_benchmark_variant_status(variant: str) -> str:
+    return "stable" if variant in QWEN_DEFAULT_BENCHMARK_VARIANTS else "experimental"
+
+
 @dataclass(frozen=True)
 class QwenTraceRequest:
     request_id: str
@@ -184,11 +188,6 @@ def build_qwen_benchmark_config(
         "offload_path": offload_path,
         "device_memory_ratio": device_memory_ratio,
         "num_threads": num_threads,
-        "benchmark_variant_status": (
-            "stable"
-            if variant in QWEN_DEFAULT_BENCHMARK_VARIANTS
-            else "experimental"
-        ),
         "prefetch": prefetch,
         "policy_score_only": policy_score_only,
         "offloading_policy": offloading_policy,

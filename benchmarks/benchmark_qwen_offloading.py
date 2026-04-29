@@ -26,6 +26,7 @@ from moe_infinity.utils.qwen_benchmark import (
     discover_trace_files,
     load_chat_trace,
     prepare_case_paths,
+    qwen_benchmark_variant_status,
     render_markdown_summary,
     summarize_hit_rate_tensor,
     validate_requests_within_token_budget,
@@ -493,6 +494,9 @@ def _run_case(
                     "trace_name": trace_name,
                     "trace_path": str(trace_path),
                     "variant": variant,
+                    "benchmark_variant_status": qwen_benchmark_variant_status(
+                        variant
+                    ),
                     "config": config,
                     "offload_path": case_paths["offload_path"],
                     "offload_cache_template": case_paths.get(
@@ -591,6 +595,7 @@ def _run_case(
             "trace_name": trace_name,
             "trace_path": str(trace_path),
             "variant": variant,
+            "benchmark_variant_status": qwen_benchmark_variant_status(variant),
             "config": config,
             "offload_path": case_paths["offload_path"],
             "offload_cache_template": case_paths.get("offload_cache_template", ""),
