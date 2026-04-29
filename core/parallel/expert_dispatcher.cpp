@@ -394,6 +394,10 @@ void ExpertDispatcher::NotifyFetchStart() {
   for (int i = 0; i < kNumDevices(); ++i) {
     // std::unique_lock<std::mutex> lock(input_mutex_[i]);
     input_queue_[i].NotifyAll();
+    // Cache hits bypass the fetch queue and are pushed directly to exec_queue_.
+    // Wake exec workers after a dispatch batch so a missed per-item wake cannot
+    // strand already-enqueued hit tasks.
+    exec_queue_[i].NotifyAll();
   }
 }
 

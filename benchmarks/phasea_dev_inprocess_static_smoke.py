@@ -42,6 +42,7 @@ MODEL = Path(
 TRACE_DIR = Path(os.environ.get("DEV_TRACE_DIR", str(REPO / "benchmarks/traces/qwen")))
 TRACE_NAME = os.environ.get("DEV_TRACE_NAME", "mixed")
 OFFLOAD_CACHE_TEMPLATE = os.environ.get("DEV_OFFLOAD_CACHE_TEMPLATE", "")
+DEV_BASE_VARIANT = os.environ.get("DEV_BASE_VARIANT", "static_hot_prefetch")
 RESET_BETWEEN_CASES = os.environ.get("DEV_RESET_BETWEEN_CASES", "1") != "0"
 DEV_WARMUP_REQUESTS = int(os.environ.get("DEV_WARMUP_REQUESTS", "0"))
 DEV_REPEATS = int(os.environ.get("DEV_REPEATS", "1"))
@@ -414,6 +415,7 @@ def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> 
         "",
         f"- model_load_s: {setup_timing.get('model_load_s', 0.0):.2f}",
         f"- total_setup_s: {setup_timing.get('total_setup_s', 0.0):.2f}",
+        f"- base_variant: {DEV_BASE_VARIANT}",
         f"- reset_between_cases: {str(RESET_BETWEEN_CASES).lower()}",
         f"- warmup_requests_per_case: {DEV_WARMUP_REQUESTS}",
         f"- repeats: {DEV_REPEATS}",
@@ -495,7 +497,7 @@ def main() -> None:
         use_fast=False,
     )
     config = build_qwen_benchmark_config(
-        variant="static_hot_prefetch",
+        variant=DEV_BASE_VARIANT,
         offload_path=OFFLOAD_CACHE_TEMPLATE,
         device_memory_ratio=float(os.environ.get("DEV_DEVICE_MEMORY_RATIO", "0.30")),
         num_threads=1,
@@ -552,6 +554,7 @@ def main() -> None:
         "reset_between_cases": RESET_BETWEEN_CASES,
         "warmup_requests": DEV_WARMUP_REQUESTS,
         "measured_requests": measured_requests,
+        "base_variant": DEV_BASE_VARIANT,
         "repeats": DEV_REPEATS,
         "bracketed_baseline": DEV_BRACKETED_BASELINE,
         "shuffle_cases": DEV_SHUFFLE_CASES,
