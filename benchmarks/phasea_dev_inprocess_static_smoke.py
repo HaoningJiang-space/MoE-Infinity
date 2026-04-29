@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,11 +45,22 @@ OFFLOAD_CACHE_TEMPLATE = os.environ.get("DEV_OFFLOAD_CACHE_TEMPLATE", "")
 RESET_BETWEEN_CASES = os.environ.get("DEV_RESET_BETWEEN_CASES", "1") != "0"
 DEV_WARMUP_REQUESTS = int(os.environ.get("DEV_WARMUP_REQUESTS", "0"))
 DEV_REPEATS = int(os.environ.get("DEV_REPEATS", "1"))
+DEV_BRACKETED_BASELINE = os.environ.get("DEV_BRACKETED_BASELINE", "0") != "0"
+DEV_SHUFFLE_CASES = os.environ.get("DEV_SHUFFLE_CASES", "0") != "0"
+DEV_RANDOM_SEED = int(os.environ.get("DEV_RANDOM_SEED", "36"))
+DEV_DRIFT_INVALID_THRESHOLD = float(
+    os.environ.get("DEV_DRIFT_INVALID_THRESHOLD", "0.10")
+)
 
 
 CASES: Dict[str, Dict[str, Any]] = {
     "on_demand": {
         "enable_prefetch": False,
+        "policy_disabled": True,
+        "execution_mode": "disabled",
+    },
+    "prefetch_enabled_no_policy": {
+        "enable_prefetch": True,
         "policy_disabled": True,
         "execution_mode": "disabled",
     },
@@ -83,6 +95,21 @@ def _selected_case_names() -> List[str]:
     if unknown:
         raise ValueError(f"Unknown DEV_CASES entries: {unknown}")
     return names
+
+
+def _case_sequence_for_repeat(repeat_idx: int) -> List[tuple[str, str]]:
+    names = _selected_case_names()
+    if not DEV_BRACKETED_BASELINE:
+        return [(name, "case") for name in names]
+
+    mechanisms = [name for name in names if name != "on_demand"]
+    if DEV_SHUFFLE_CASES:
+        random.Random(DEV_RANDOM_SEED + repeat_idx).shuffle(mechanisms)
+    return (
+        [("on_demand", "baseline_pre")]
+        + [(name, "mechanism") for name in mechanisms]
+        + [("on_demand", "baseline_post")]
+    )
 
 
 def _apply_case(model: MoE, case: Dict[str, Any]) -> None:
@@ -165,6 +192,8 @@ def _run_case(
     requests,
     run_label: str,
     case_name: str,
+    repeat_idx: int,
+    case_role: str,
     warmup_requests: int,
     max_input_length: int,
     max_new_tokens: int,
@@ -283,6 +312,8 @@ def _run_case(
     return {
         "run_label": run_label,
         "case_name": case_name,
+        "repeat_idx": int(repeat_idx),
+        "case_role": case_role,
         "case": case,
         "warmup_requests": int(warmup_requests),
         "measured_requests": max(len(requests) - int(warmup_requests), 0),
@@ -308,7 +339,74 @@ def _slow_request_count(result: Dict[str, Any], threshold_ms: float = 150.0) -> 
     )
 
 
+def _tps(result: Dict[str, Any]) -> float:
+    return float(result.get("aggregate", {}).get("generated_tokens_per_second", 0.0))
+
+
+def _bracket_info(results: Dict[str, Any]) -> Dict[int, Dict[str, float | bool]]:
+    grouped: Dict[int, Dict[str, float]] = {}
+    for result in results.values():
+        repeat_idx = int(result.get("repeat_idx", 0))
+        role = result.get("case_role", "")
+        if role not in ("baseline_pre", "baseline_post"):
+            continue
+        grouped.setdefault(repeat_idx, {})[role] = _tps(result)
+
+    info: Dict[int, Dict[str, float | bool]] = {}
+    for repeat_idx, values in grouped.items():
+        pre = float(values.get("baseline_pre", 0.0))
+        post = float(values.get("baseline_post", 0.0))
+        mean = (pre + post) / 2.0 if pre > 0.0 and post > 0.0 else 0.0
+        drift = abs(pre - post) / mean if mean > 0.0 else 1.0
+        info[repeat_idx] = {
+            "baseline_pre_tps": pre,
+            "baseline_post_tps": post,
+            "baseline_mean_tps": mean,
+            "baseline_drift": drift,
+            "valid": drift <= DEV_DRIFT_INVALID_THRESHOLD,
+        }
+    return info
+
+
+def _mean(values: List[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _render_normalized_means(
+    results: Dict[str, Any],
+    brackets: Dict[int, Dict[str, float | bool]],
+) -> List[str]:
+    grouped: Dict[str, List[float]] = {}
+    for result in results.values():
+        if result.get("case_role") != "mechanism":
+            continue
+        repeat_idx = int(result.get("repeat_idx", 0))
+        bracket = brackets.get(repeat_idx, {})
+        baseline = float(bracket.get("baseline_mean_tps", 0.0))
+        if not bracket.get("valid", False) or baseline <= 0.0:
+            continue
+        grouped.setdefault(str(result.get("case_name", "")), []).append(
+            _tps(result) / baseline
+        )
+
+    lines = [
+        "## Valid Bracket-Normalized Mechanism Means",
+        "",
+        "| case | valid repeats | mean normalized tok/s |",
+        "| --- | ---: | ---: |",
+    ]
+    for case_name in sorted(grouped):
+        values = grouped[case_name]
+        lines.append(
+            f"| {case_name} | {len(values)} | {_mean(values):.3f} |"
+        )
+    if not grouped:
+        lines.append("| none | 0 | 0.000 |")
+    return lines
+
+
 def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> str:
+    brackets = _bracket_info(results)
     lines = [
         "# Dev In-Process Static Smoke",
         "",
@@ -319,17 +417,46 @@ def _render_summary(results: Dict[str, Any], setup_timing: Dict[str, float]) -> 
         f"- reset_between_cases: {str(RESET_BETWEEN_CASES).lower()}",
         f"- warmup_requests_per_case: {DEV_WARMUP_REQUESTS}",
         f"- repeats: {DEV_REPEATS}",
+        f"- bracketed_baseline: {str(DEV_BRACKETED_BASELINE).lower()}",
+        f"- shuffle_cases: {str(DEV_SHUFFLE_CASES).lower()}",
+        f"- random_seed: {DEV_RANDOM_SEED}",
+        f"- drift_invalid_threshold: {DEV_DRIFT_INVALID_THRESHOLD:.3f}",
         "",
-        "| run | case | tok/s | ms/token | slow req >150ms | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if DEV_BRACKETED_BASELINE:
+        lines.extend(_render_normalized_means(results, brackets))
+        lines.extend(
+            [
+                "",
+                "## Per-Run Results",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "| run | repeat | role | case | tok/s | norm vs bracket | bracket drift | bracket valid | ms/token | slow req >150ms | candidates | admitted | runtime enqueue | queue push | same-device skip | complete | miss | evict |",
+            "| --- | ---: | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for run_label, result in results.items():
         agg = result.get("aggregate", {})
+        repeat_idx = int(result.get("repeat_idx", 0))
+        bracket = brackets.get(repeat_idx, {})
+        baseline = float(bracket.get("baseline_mean_tps", 0.0))
+        tps = float(agg.get("generated_tokens_per_second", 0.0))
+        norm = tps / baseline if baseline > 0.0 and result.get("case_role") == "mechanism" else 0.0
+        drift = float(bracket.get("baseline_drift", 0.0))
+        valid = bracket.get("valid", True)
         lines.append(
-            "| {run} | {case} | {tps:.3f} | {mpt:.2f} | {slow} | {cand} | {admit} | {rt_enq} | {push} | {skip} | {comp} | {miss} | {evict} |".format(
+            "| {run} | {repeat} | {role} | {case} | {tps:.3f} | {norm:.3f} | {drift:.3f} | {valid} | {mpt:.2f} | {slow} | {cand} | {admit} | {rt_enq} | {push} | {skip} | {comp} | {miss} | {evict} |".format(
                 run=run_label,
+                repeat=repeat_idx,
+                role=result.get("case_role", ""),
                 case=result.get("case_name", ""),
-                tps=float(agg.get("generated_tokens_per_second", 0.0)),
+                tps=tps,
+                norm=norm,
+                drift=drift,
+                valid=str(bool(valid)).lower(),
                 mpt=float(agg.get("latency_per_generated_token_mean_ms", 0.0)),
                 slow=_slow_request_count(result),
                 cand=agg.get("prefetch_candidate_count_total", 0),
@@ -393,8 +520,12 @@ def main() -> None:
     results: Dict[str, Any] = {}
     try:
         for repeat_idx in range(max(DEV_REPEATS, 1)):
-            for case_idx, case_name in enumerate(_selected_case_names()):
-                run_label = f"r{repeat_idx:02d}__c{case_idx:02d}__{case_name}"
+            for case_idx, (case_name, case_role) in enumerate(
+                _case_sequence_for_repeat(repeat_idx)
+            ):
+                run_label = (
+                    f"r{repeat_idx:02d}__c{case_idx:02d}__{case_role}__{case_name}"
+                )
                 with (ROOT / "driver.log").open("a", encoding="utf-8") as log:
                     log.write(f"[{_now()}] start {run_label}\n")
                 results[run_label] = _run_case(
@@ -403,6 +534,8 @@ def main() -> None:
                     requests=requests,
                     run_label=run_label,
                     case_name=case_name,
+                    repeat_idx=repeat_idx,
+                    case_role=case_role,
                     warmup_requests=DEV_WARMUP_REQUESTS,
                     max_input_length=max_input_length,
                     max_new_tokens=max_new_tokens,
@@ -420,6 +553,11 @@ def main() -> None:
         "warmup_requests": DEV_WARMUP_REQUESTS,
         "measured_requests": measured_requests,
         "repeats": DEV_REPEATS,
+        "bracketed_baseline": DEV_BRACKETED_BASELINE,
+        "shuffle_cases": DEV_SHUFFLE_CASES,
+        "random_seed": DEV_RANDOM_SEED,
+        "drift_invalid_threshold": DEV_DRIFT_INVALID_THRESHOLD,
+        "brackets": _bracket_info(results),
         "results": results,
     }
     (ROOT / "analysis" / "dev_inprocess_static_smoke.json").write_text(
