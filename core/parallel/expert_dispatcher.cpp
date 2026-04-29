@@ -65,11 +65,14 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       cache_mutex_(kNumDevices()),
       cache_cv_(kNumDevices()),
       input_queue_(kNumDevices()),
-      gpu_overload_(kNumDevices(), false),
+      gpu_overload_(kNumDevices()),
       exec_queue_(kNumDevices()),
       cached_experts_(kNumDevices()),
       modules_(kNumDevices(), nullptr) {
   main_thread_stop_flag_.store(false);
+  for (auto& overload : gpu_overload_) {
+    overload.store(false, std::memory_order_relaxed);
+  }
 
   // module_ = new MoEMLP(dtype, expert_type);
 
@@ -425,7 +428,7 @@ void ExpertDispatcher::ResetExpertCacheState() {
       cached_experts_[gpu_id].clear();
       cache_sizes_[gpu_id] =
           kTopologyHandle->GetSparseCacheLimit(torch::Device(torch::kCUDA, gpu_id));
-      gpu_overload_[gpu_id] = false;
+      gpu_overload_[gpu_id].store(false, std::memory_order_release);
     }
     cache_cv_[gpu_id].notify_all();
   }
@@ -548,6 +551,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                "cache_size ", cache_sizes_[gpu_id], " incache count ",
                cached_experts_[gpu_id].size());
 
+    bool overload_fetch = false;
     if (!cache_hit && cache_sizes_[gpu_id] < expert_node->node->byte_size) {
       if (batch_size > 1) {
         // force fetch to GPU regardless of cache size, only for prefill
@@ -556,12 +560,18 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
                    cache_sizes_[gpu_id], " incache count ",
                    cached_experts_[gpu_id].size(), " layer_idx ", layer_idx,
                    " expert_idx ", expert_idx);
-        // gpu_overload_[gpu_id].wait_and_set(false, true);
-        // busy wait for cache to be available
-        while (gpu_overload_[gpu_id]) {
-          std::this_thread::sleep_for(std::chrono::microseconds(1));
+        {
+          std::unique_lock<std::mutex> lock(cache_mutex_[gpu_id]);
+          cache_cv_[gpu_id].wait(lock, [&] {
+            return main_thread_stop_flag_.load() ||
+                   !gpu_overload_[gpu_id].load(std::memory_order_acquire);
+          });
+          if (main_thread_stop_flag_.load()) {
+            continue;
+          }
+          gpu_overload_[gpu_id].store(true, std::memory_order_release);
         }
-        gpu_overload_[gpu_id] = true;
+        overload_fetch = true;
       } else {
         // find the expert in gpu and min incache_visit_count
         ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
@@ -650,7 +660,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       }
     }
 
-    if (!gpu_overload_[gpu_id]) {
+    if (!overload_fetch) {
       cache_sizes_[gpu_id] -= expert_node->node->byte_size;
       uint64_t key = (layer_idx << 32) + expert_idx;
       cached_experts_[gpu_id].insert(key);
@@ -696,7 +706,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       exec_args.expert_node = expert_node;
       exec_args.out_gpu_id = original_device.index();
       exec_args.out_dtype = c10::typeMetaToScalarType(hidden_states_.dtype());
-      exec_args.evict = gpu_overload_[gpu_id];
+      exec_args.evict = overload_fetch;
       exec_args.hit = cache_hit;
       // std::lock_guard<std::mutex> lock(exec_mutex_[gpu_id]);
       // exec_queue_[gpu_id].emplace_back(std::move(exec_args));
@@ -813,7 +823,10 @@ void ExpertDispatcher::OutputFunc(ExecArgs args, torch::Tensor output,
                "expert_idx ", expert_idx);
     // std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
     // gpu_overload_[gpu_id].set_and_wake(true);
-    gpu_overload_[gpu_id] = false;
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex_[gpu_id]);
+      gpu_overload_[gpu_id].store(false, std::memory_order_release);
+    }
   }
   cache_cv_[gpu_id].notify_all();
 

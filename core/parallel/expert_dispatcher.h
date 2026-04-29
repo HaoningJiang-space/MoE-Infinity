@@ -10,6 +10,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -89,6 +90,7 @@ class ExpertDispatcher : public base::noncopyable {
 
   ExpertNodePtr FindExpertEvict(int gpu_id);
   void WaitForPendingZero(const char* caller);
+  std::string ActiveExecDebugString() const;
 
  private:
   std::vector<std::unique_ptr<base::Thread>> threads_;
@@ -129,6 +131,9 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> demand_candidate_protect_fallback_count_{0};
   std::atomic<std::uint64_t> candidate_resident_hit_count_{0};
   std::atomic<std::uint64_t> candidate_demand_miss_count_{0};
+  std::vector<std::atomic<std::int64_t>> active_exec_layer_;
+  std::vector<std::atomic<std::int64_t>> active_exec_expert_;
+  std::vector<std::atomic<std::uint64_t>> active_exec_start_us_;
 
   std::atomic<size_t> pending_;
 
@@ -149,7 +154,7 @@ class ExpertDispatcher : public base::noncopyable {
 
   std::vector<cudaStream_t> exec_streams_;
 
-  std::vector<bool> gpu_overload_;
+  std::vector<std::atomic<bool>> gpu_overload_;
 
   torch::Tensor hidden_states_;
   torch::Tensor final_hidden_states_;
