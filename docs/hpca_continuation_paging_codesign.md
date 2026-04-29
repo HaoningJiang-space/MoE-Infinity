@@ -10,6 +10,7 @@ v43-v47 之后，HPCA 方向需要更克制：
 - v47 固定 forward 输入下，`history_reuse_local_backbone` 发出 `11008` 个 candidate/admit/enqueue，但只有约 `100` 个 prefetch resident hit，吞吐约为 baseline 的 `0.885x`。
 - `trace_similarity_prefetch` 当前 candidate/admit 为 `0`，不能作为有效 prefetch baseline。
 - `generate` 模式只用于功能 smoke；正式机制比较必须使用 fixed-input forward benchmark、bracketed baseline 和 lifecycle counters。
+- v50 重新渲染 v47 raw 后发现，`history_reuse_local_backbone` 的 `skip/enqueue` 约 `0.9895`。这说明当前负结果更精确地说是：大多数 prefetch hint 指向已经在 GPU 上的 expert，真正 transfer opportunity 很少，不能简单写成“搬运带宽全部浪费”。
 
 当前可保留的 HPCA 主张是：
 
@@ -35,9 +36,13 @@ v43-v47 之后，HPCA 方向需要更克制：
 - enqueue
 - queue push
 - same-device skip
+- transfer opportunity
 - completed
 - resident hit
 - late miss
+- `opportunity/candidate`
+- `push/opportunity`
+- `hit/opportunity`
 - `push/candidate`
 - `push/enqueue`
 - `skip/enqueue`
@@ -45,6 +50,7 @@ v43-v47 之后，HPCA 方向需要更克制：
 - `used/complete`
 
 如果 `used/candidate < 5%`，但 `skip/enqueue` 很高，则该 run 主要说明 prefetch hint 大量命中“已经在 GPU 上”的 expert，属于 prefetch no-op / control-plane overhead 问题，不能简单写成带宽浪费。
+如果 `opportunity/candidate < 5%`，则当前配置下没有足够真实预取机会，继续调 predictor/policy 不会给出可信加速结论。
 如果 `used/complete` 很低，才说明真正搬上 GPU 的 speculative expert 没有被 timely/usefully 使用。
 
 ### Baseline 约束
@@ -57,7 +63,7 @@ v43-v47 之后，HPCA 方向需要更克制：
 
 一个 HPCA/System 机制要继续推进，至少要同时满足：
 
-- forward-mode lifecycle 中 `used/candidate` 明显高于当前 local runtime 负例。
+- forward-mode lifecycle 中 `opportunity/candidate` 和 `hit/opportunity` 明显高于当前 local runtime 负例。
 - bracket-normalized tok/s 至少稳定优于 on-demand，且跨重复 run 方向一致。
 - 强 pressure 下没有 pending stall、all-locked fatal 或 no-victim runaway。
 - overhead breakdown 能说明收益来自机制本身，而不是输入长度、EOS、模型加载或 offload cache 差异。

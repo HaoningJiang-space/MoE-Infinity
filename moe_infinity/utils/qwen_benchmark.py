@@ -572,6 +572,46 @@ def aggregate_request_records(
         )
         for record in request_records
     ]
+    prefetch_candidate_resident_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_candidate_resident_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    prefetch_candidate_transfer_opportunity_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_candidate_transfer_opportunity_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    prefetch_admitted_resident_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_admitted_resident_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    prefetch_admitted_transfer_opportunity_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_admitted_transfer_opportunity_count", 0
+            )
+        )
+        for record in request_records
+    ]
+    prefetch_residency_probe_error_counts = [
+        int(
+            record.get("prefetcher_stats", {}).get(
+                "prefetch_residency_probe_error_count", 0
+            )
+        )
+        for record in request_records
+    ]
     demand_prefetch_conflict_counts = [
         int(record.get("prefetcher_stats", {}).get("demand_prefetch_conflict_count", 0))
         for record in request_records
@@ -693,6 +733,21 @@ def aggregate_request_records(
     prefetch_enqueue_count_total = int(sum(prefetch_enqueue_counts))
     prefetch_drop_cap_count_total = int(sum(prefetch_drop_cap_counts))
     prefetch_drop_pressure_count_total = int(sum(prefetch_drop_pressure_counts))
+    prefetch_candidate_resident_count_total = int(
+        sum(prefetch_candidate_resident_counts)
+    )
+    prefetch_candidate_transfer_opportunity_count_total = int(
+        sum(prefetch_candidate_transfer_opportunity_counts)
+    )
+    prefetch_admitted_resident_count_total = int(
+        sum(prefetch_admitted_resident_counts)
+    )
+    prefetch_admitted_transfer_opportunity_count_total = int(
+        sum(prefetch_admitted_transfer_opportunity_counts)
+    )
+    prefetch_residency_probe_error_count_total = int(
+        sum(prefetch_residency_probe_error_counts)
+    )
     prefetch_runtime_queue_push_count_total = int(
         prefetch_runtime_totals.get("prefetch_runtime_queue_push_count_total", 0)
     )
@@ -738,13 +793,44 @@ def aggregate_request_records(
         prefetch_runtime_same_device_skip_count_total,
         prefetch_enqueue_count_total,
     )
+    prefetch_candidate_transfer_opportunity_rate = safe_ratio(
+        prefetch_candidate_transfer_opportunity_count_total,
+        prefetch_candidate_count_total,
+    )
+    prefetch_admitted_transfer_opportunity_rate = safe_ratio(
+        prefetch_admitted_transfer_opportunity_count_total,
+        prefetch_admitted_count_total,
+    )
+    prefetch_resident_candidate_rate = safe_ratio(
+        prefetch_candidate_resident_count_total,
+        prefetch_candidate_count_total,
+    )
+    prefetch_queue_push_per_transfer_opportunity = safe_ratio(
+        prefetch_runtime_queue_push_count_total,
+        prefetch_candidate_transfer_opportunity_count_total,
+    )
+    prefetch_used_per_transfer_opportunity = safe_ratio(
+        dispatcher_prefetch_resident_hit_count_total,
+        prefetch_candidate_transfer_opportunity_count_total,
+    )
     if prefetch_candidate_count_total <= 0:
         prefetch_lifecycle_status = "no_prefetch_candidates"
     elif (
-        prefetch_queue_push_per_candidate < 0.05
-        and prefetch_same_device_skip_per_enqueue > 0.80
+        prefetch_candidate_transfer_opportunity_rate < 0.05
+        or (
+            prefetch_queue_push_per_candidate < 0.05
+            and prefetch_same_device_skip_per_enqueue > 0.80
+        )
     ):
         prefetch_lifecycle_status = "mostly_already_resident"
+    elif prefetch_queue_push_per_transfer_opportunity < 0.05:
+        prefetch_lifecycle_status = "transfer_opportunity_not_queued"
+    elif (
+        prefetch_runtime_queue_push_count_total > 0
+        and prefetch_runtime_complete_count_total
+        < (0.05 * prefetch_runtime_queue_push_count_total)
+    ):
+        prefetch_lifecycle_status = "queued_but_not_completed"
     elif (
         prefetch_runtime_complete_count_total > 0
         and prefetch_used_per_completed < 0.05
@@ -822,6 +908,11 @@ def aggregate_request_records(
         "prefetch_drop_no_evictable_count_total": int(
             sum(prefetch_drop_no_evictable_counts)
         ),
+        "prefetch_candidate_resident_count_total": prefetch_candidate_resident_count_total,
+        "prefetch_candidate_transfer_opportunity_count_total": prefetch_candidate_transfer_opportunity_count_total,
+        "prefetch_admitted_resident_count_total": prefetch_admitted_resident_count_total,
+        "prefetch_admitted_transfer_opportunity_count_total": prefetch_admitted_transfer_opportunity_count_total,
+        "prefetch_residency_probe_error_count_total": prefetch_residency_probe_error_count_total,
         "demand_prefetch_conflict_count_total": int(
             sum(demand_prefetch_conflict_counts)
         ),
@@ -861,6 +952,11 @@ def aggregate_request_records(
         ),
         "prefetch_queue_push_per_candidate": prefetch_queue_push_per_candidate,
         "prefetch_same_device_skip_per_enqueue": prefetch_same_device_skip_per_enqueue,
+        "prefetch_candidate_transfer_opportunity_rate": prefetch_candidate_transfer_opportunity_rate,
+        "prefetch_admitted_transfer_opportunity_rate": prefetch_admitted_transfer_opportunity_rate,
+        "prefetch_resident_candidate_rate": prefetch_resident_candidate_rate,
+        "prefetch_queue_push_per_transfer_opportunity": prefetch_queue_push_per_transfer_opportunity,
+        "prefetch_used_per_transfer_opportunity": prefetch_used_per_transfer_opportunity,
         "prefetch_dequeue_per_queue_push": safe_ratio(
             prefetch_runtime_dequeue_count_total,
             prefetch_runtime_queue_push_count_total,
@@ -1196,25 +1292,31 @@ def render_markdown_summary(
                 "",
                 "### Prefetch Lifecycle",
                 "",
-                "| Variant | status | candidates | admitted | enqueue | queue push | same-device skip | complete | resident hit | late miss | push/cand | push/enqueue | skip/enqueue | complete/admit | used/cand | used/complete | queue cleared/push |",
-                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | status | candidates | transfer opp | resident cand | admitted opp | queue push | complete | resident hit | late miss | opp/cand | push/opp | hit/opp | skip/enqueue | used/complete | probe errors |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {status} | {candidates} | {admitted} | {enqueue} | {queue_push} | {same_device_skip} | {complete} | {resident_hit} | {late_miss} | {push_candidate:.4f} | {push_enqueue:.4f} | {skip_enqueue:.4f} | {complete_admit:.4f} | {used_candidate:.4f} | {used_complete:.4f} | {queue_cleared_push:.4f} |".format(
+                "| {variant} | {status} | {candidates} | {opportunity} | {resident_candidate} | {admitted_opportunity} | {queue_push} | {complete} | {resident_hit} | {late_miss} | {opportunity_rate:.4f} | {push_opportunity:.4f} | {hit_opportunity:.4f} | {skip_enqueue:.4f} | {used_complete:.4f} | {probe_errors} |".format(
                     variant=variant,
                     status=agg.get("prefetch_lifecycle_status", ""),
                     candidates=agg.get("prefetch_candidate_count_total", 0),
-                    admitted=agg.get("prefetch_admitted_count_total", 0),
-                    enqueue=agg.get("prefetch_enqueue_count_total", 0),
-                    queue_push=agg.get(
-                        "prefetch_runtime_queue_push_count_total",
+                    opportunity=agg.get(
+                        "prefetch_candidate_transfer_opportunity_count_total",
                         0,
                     ),
-                    same_device_skip=agg.get(
-                        "prefetch_runtime_same_device_skip_count_total",
+                    resident_candidate=agg.get(
+                        "prefetch_candidate_resident_count_total",
+                        0,
+                    ),
+                    admitted_opportunity=agg.get(
+                        "prefetch_admitted_transfer_opportunity_count_total",
+                        0,
+                    ),
+                    queue_push=agg.get(
+                        "prefetch_runtime_queue_push_count_total",
                         0,
                     ),
                     complete=agg.get(
@@ -1229,27 +1331,26 @@ def render_markdown_summary(
                         "dispatcher_late_prefetch_demand_miss_count_total",
                         0,
                     ),
-                    push_candidate=agg.get(
-                        "prefetch_queue_push_per_candidate",
+                    opportunity_rate=agg.get(
+                        "prefetch_candidate_transfer_opportunity_rate",
                         0.0,
                     ),
-                    push_enqueue=agg.get(
-                        "prefetch_queue_push_per_enqueue",
+                    push_opportunity=agg.get(
+                        "prefetch_queue_push_per_transfer_opportunity",
+                        0.0,
+                    ),
+                    hit_opportunity=agg.get(
+                        "prefetch_used_per_transfer_opportunity",
                         0.0,
                     ),
                     skip_enqueue=agg.get(
                         "prefetch_same_device_skip_per_enqueue",
                         0.0,
                     ),
-                    complete_admit=agg.get(
-                        "prefetch_complete_per_admitted",
-                        0.0,
-                    ),
-                    used_candidate=agg.get("prefetch_used_per_candidate", 0.0),
                     used_complete=agg.get("prefetch_used_per_completed", 0.0),
-                    queue_cleared_push=agg.get(
-                        "prefetch_queue_cleared_per_queue_push",
-                        0.0,
+                    probe_errors=agg.get(
+                        "prefetch_residency_probe_error_count_total",
+                        0,
                     ),
                 )
             )

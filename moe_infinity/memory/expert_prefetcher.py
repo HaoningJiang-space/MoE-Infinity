@@ -47,6 +47,11 @@ class ExpertPrefetcher(object):
             "prefetch_drop_cap_count": 0,
             "prefetch_drop_pressure_count": 0,
             "prefetch_drop_no_evictable_count": 0,
+            "prefetch_candidate_resident_count": 0,
+            "prefetch_candidate_transfer_opportunity_count": 0,
+            "prefetch_admitted_resident_count": 0,
+            "prefetch_admitted_transfer_opportunity_count": 0,
+            "prefetch_residency_probe_error_count": 0,
             "prefetch_under_pressure_count": 0,
             "demand_prefetch_conflict_count": 0,
             "pressure_sample_count": 0,
@@ -134,13 +139,43 @@ class ExpertPrefetcher(object):
             evictable if current_min is None else min(int(current_min), evictable)
         )
 
+    def _record_prefetch_residency(self, tensor_ids, *, admitted=False):
+        if not tensor_ids:
+            return
+        stats = self._prefetch_runtime_stats
+        resident_key = (
+            "prefetch_admitted_resident_count"
+            if admitted
+            else "prefetch_candidate_resident_count"
+        )
+        opportunity_key = (
+            "prefetch_admitted_transfer_opportunity_count"
+            if admitted
+            else "prefetch_candidate_transfer_opportunity_count"
+        )
+        for tensor_id in tensor_ids:
+            try:
+                current_device = int(self.archer_engine.get_node_device([tensor_id]))
+                target_device = int(
+                    self.archer_engine.get_node_default_device([tensor_id])
+                )
+            except Exception:
+                stats["prefetch_residency_probe_error_count"] += 1
+                continue
+            if current_device == target_device:
+                stats[resident_key] += 1
+            else:
+                stats[opportunity_key] += 1
+
     def _admit_prefetch_tensor_ids(self, tensor_ids):
         stats = self._prefetch_runtime_stats
         stats["prefetch_candidate_count"] += len(tensor_ids)
+        self._record_prefetch_residency(tensor_ids, admitted=False)
         if not tensor_ids:
             return []
         if not bool(getattr(self, "prefetch_admission_enabled", False)):
             stats["prefetch_admitted_count"] += len(tensor_ids)
+            self._record_prefetch_residency(tensor_ids, admitted=True)
             return tensor_ids
 
         demand_reserve = max(
@@ -210,6 +245,7 @@ class ExpertPrefetcher(object):
             admitted_by_gpu[gpu_id] = admitted_by_gpu.get(gpu_id, 0) + 1
 
         stats["prefetch_admitted_count"] += len(admitted)
+        self._record_prefetch_residency(admitted, admitted=True)
         return admitted
 
     def speculation_credit(self):
