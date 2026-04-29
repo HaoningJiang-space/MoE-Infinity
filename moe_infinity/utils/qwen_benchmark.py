@@ -696,6 +696,11 @@ def aggregate_request_records(
     prefetch_runtime_queue_push_count_total = int(
         prefetch_runtime_totals.get("prefetch_runtime_queue_push_count_total", 0)
     )
+    prefetch_runtime_same_device_skip_count_total = int(
+        prefetch_runtime_totals.get(
+            "prefetch_runtime_same_device_skip_count_total", 0
+        )
+    )
     prefetch_runtime_dequeue_count_total = int(
         prefetch_runtime_totals.get("prefetch_runtime_dequeue_count_total", 0)
     )
@@ -725,10 +730,28 @@ def aggregate_request_records(
         dispatcher_prefetch_resident_hit_count_total,
         prefetch_runtime_complete_count_total,
     )
+    prefetch_queue_push_per_candidate = safe_ratio(
+        prefetch_runtime_queue_push_count_total,
+        prefetch_candidate_count_total,
+    )
+    prefetch_same_device_skip_per_enqueue = safe_ratio(
+        prefetch_runtime_same_device_skip_count_total,
+        prefetch_enqueue_count_total,
+    )
     if prefetch_candidate_count_total <= 0:
         prefetch_lifecycle_status = "no_prefetch_candidates"
+    elif (
+        prefetch_queue_push_per_candidate < 0.05
+        and prefetch_same_device_skip_per_enqueue > 0.80
+    ):
+        prefetch_lifecycle_status = "mostly_already_resident"
+    elif (
+        prefetch_runtime_complete_count_total > 0
+        and prefetch_used_per_completed < 0.05
+    ):
+        prefetch_lifecycle_status = "completed_but_unused"
     elif prefetch_used_per_candidate < 0.05:
-        prefetch_lifecycle_status = "low_useful_conversion"
+        prefetch_lifecycle_status = "low_end_to_end_conversion"
     else:
         prefetch_lifecycle_status = "has_useful_conversion"
     return {
@@ -836,6 +859,8 @@ def aggregate_request_records(
         "prefetch_queue_push_per_enqueue": safe_ratio(
             prefetch_runtime_queue_push_count_total, prefetch_enqueue_count_total
         ),
+        "prefetch_queue_push_per_candidate": prefetch_queue_push_per_candidate,
+        "prefetch_same_device_skip_per_enqueue": prefetch_same_device_skip_per_enqueue,
         "prefetch_dequeue_per_queue_push": safe_ratio(
             prefetch_runtime_dequeue_count_total,
             prefetch_runtime_queue_push_count_total,
@@ -1171,20 +1196,25 @@ def render_markdown_summary(
                 "",
                 "### Prefetch Lifecycle",
                 "",
-                "| Variant | status | candidates | admitted | queue push | complete | resident hit | late miss | admit/cand | complete/admit | used/cand | used/admit | used/complete | queue cleared/push |",
-                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | status | candidates | admitted | enqueue | queue push | same-device skip | complete | resident hit | late miss | push/cand | push/enqueue | skip/enqueue | complete/admit | used/cand | used/complete | queue cleared/push |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for variant in benchmark_summary["variants"]:
             agg = current[variant]["aggregate"]
             lines.append(
-                "| {variant} | {status} | {candidates} | {admitted} | {queue_push} | {complete} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {complete_admit:.4f} | {used_candidate:.4f} | {used_admitted:.4f} | {used_complete:.4f} | {queue_cleared_push:.4f} |".format(
+                "| {variant} | {status} | {candidates} | {admitted} | {enqueue} | {queue_push} | {same_device_skip} | {complete} | {resident_hit} | {late_miss} | {push_candidate:.4f} | {push_enqueue:.4f} | {skip_enqueue:.4f} | {complete_admit:.4f} | {used_candidate:.4f} | {used_complete:.4f} | {queue_cleared_push:.4f} |".format(
                     variant=variant,
                     status=agg.get("prefetch_lifecycle_status", ""),
                     candidates=agg.get("prefetch_candidate_count_total", 0),
                     admitted=agg.get("prefetch_admitted_count_total", 0),
+                    enqueue=agg.get("prefetch_enqueue_count_total", 0),
                     queue_push=agg.get(
                         "prefetch_runtime_queue_push_count_total",
+                        0,
+                    ),
+                    same_device_skip=agg.get(
+                        "prefetch_runtime_same_device_skip_count_total",
                         0,
                     ),
                     complete=agg.get(
@@ -1199,13 +1229,23 @@ def render_markdown_summary(
                         "dispatcher_late_prefetch_demand_miss_count_total",
                         0,
                     ),
-                    admit_rate=agg.get("prefetch_admit_rate", 0.0),
+                    push_candidate=agg.get(
+                        "prefetch_queue_push_per_candidate",
+                        0.0,
+                    ),
+                    push_enqueue=agg.get(
+                        "prefetch_queue_push_per_enqueue",
+                        0.0,
+                    ),
+                    skip_enqueue=agg.get(
+                        "prefetch_same_device_skip_per_enqueue",
+                        0.0,
+                    ),
                     complete_admit=agg.get(
                         "prefetch_complete_per_admitted",
                         0.0,
                     ),
                     used_candidate=agg.get("prefetch_used_per_candidate", 0.0),
-                    used_admitted=agg.get("prefetch_used_per_admitted", 0.0),
                     used_complete=agg.get("prefetch_used_per_completed", 0.0),
                     queue_cleared_push=agg.get(
                         "prefetch_queue_cleared_per_queue_push",

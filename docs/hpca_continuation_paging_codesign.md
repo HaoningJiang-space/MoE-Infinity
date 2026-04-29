@@ -32,15 +32,20 @@ v43-v47 之后，HPCA 方向需要更克制：
 
 - candidates
 - admitted
+- enqueue
 - queue push
+- same-device skip
 - completed
 - resident hit
 - late miss
+- `push/candidate`
+- `push/enqueue`
+- `skip/enqueue`
 - `used/candidate`
-- `used/admitted`
 - `used/complete`
 
-如果 `used/candidate < 5%`，该 run 只能解释为 speculative traffic 负例，不能声称 prefetch acceleration。
+如果 `used/candidate < 5%`，但 `skip/enqueue` 很高，则该 run 主要说明 prefetch hint 大量命中“已经在 GPU 上”的 expert，属于 prefetch no-op / control-plane overhead 问题，不能简单写成带宽浪费。
+如果 `used/complete` 很低，才说明真正搬上 GPU 的 speculative expert 没有被 timely/usefully 使用。
 
 ### Baseline 约束
 
