@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measured-requests", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument(
+        "--benchmark-mode",
+        choices=("generate", "forward"),
+        default="generate",
+        help="generate runs autoregressive decoding; forward runs one fixed prompt forward pass.",
+    )
+    parser.add_argument(
         "--fixed-new-tokens",
         action="store_true",
         help="Set min_new_tokens=max_new_tokens to avoid EOS-driven early stop.",
@@ -251,6 +257,7 @@ def _run_case(
     warmup_requests: int,
     measured_requests: int,
     max_new_tokens: int,
+    benchmark_mode: str,
     fixed_new_tokens: bool,
     max_input_length: int,
     device_memory_ratio: float,
@@ -387,6 +394,8 @@ def _run_case(
         if getattr(model.engine, "offloading_policy", None) is not None:
             model.engine.offloading_policy.attach_phasea_recorder(recorder)
     dispatcher = model.engine.expert_dispatcher
+    if benchmark_mode == "forward" and hasattr(model, "model"):
+        model.model.eval()
 
     records: List[Dict[str, Any]] = []
     try:
@@ -435,11 +444,24 @@ def _run_case(
             model.engine.phasea_request_context = request_context
             try:
                 with torch.no_grad():
-                    outputs = model.generate(
-                        input_ids,
-                        attention_mask=attention_mask,
-                        **generation_kwargs,
-                    )
+                    if benchmark_mode == "generate":
+                        outputs = model.generate(
+                            input_ids,
+                            attention_mask=attention_mask,
+                            **generation_kwargs,
+                        )
+                        generated_ids = outputs[0][input_ids.shape[1] :]
+                        generated_text = tokenizer.decode(
+                            generated_ids,
+                            skip_special_tokens=True,
+                        )
+                        benchmark_tokens = int(generated_ids.numel())
+                    else:
+                        model(input_ids, attention_mask=attention_mask)
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        generated_text = ""
+                        benchmark_tokens = int(input_ids.numel())
             except Exception as exc:
                 latency_s = time.perf_counter() - start
                 failure = {
@@ -476,6 +498,7 @@ def _run_case(
                     "warmup_requests": warmup_requests,
                     "measured_requests": measured_requests,
                     "max_new_tokens": max_new_tokens,
+                    "benchmark_mode": benchmark_mode,
                     "fixed_new_tokens": bool(fixed_new_tokens),
                     "max_input_length": max_input_length,
                     "random_seed": int(random_seed),
@@ -496,12 +519,6 @@ def _run_case(
                 )
                 raise
             latency_s = time.perf_counter() - start
-
-            generated_ids = outputs[0][input_ids.shape[1] :]
-            generated_text = tokenizer.decode(
-                generated_ids,
-                skip_special_tokens=True,
-            )
             dispatcher_stats = _snapshot_dispatcher_stats(dispatcher)
             prefetcher_stats = _snapshot_prefetcher_stats(model)
             library_stats = _snapshot_library_stats(model)
@@ -546,9 +563,9 @@ def _run_case(
                 "is_warmup": is_warmup,
                 "input_tokens": input_token_count,
                 "latency_s": latency_s,
-                "generated_tokens": int(generated_ids.numel()),
+                "generated_tokens": benchmark_tokens,
                 "latency_per_generated_token_ms": (
-                    (latency_s * 1000.0) / max(int(generated_ids.numel()), 1)
+                    (latency_s * 1000.0) / max(benchmark_tokens, 1)
                 ),
                 "response_text_prefix": generated_text[:160],
                 "dispatcher_stats": dispatcher_stats,
@@ -575,6 +592,7 @@ def _run_case(
             "warmup_requests": warmup_requests,
             "measured_requests": measured_requests,
             "max_new_tokens": max_new_tokens,
+            "benchmark_mode": benchmark_mode,
             "fixed_new_tokens": bool(fixed_new_tokens),
             "max_input_length": max_input_length,
             "random_seed": int(random_seed),
@@ -646,6 +664,7 @@ def main() -> None:
                 warmup_requests=args.warmup_requests,
                 measured_requests=args.measured_requests,
                 max_new_tokens=args.max_new_tokens,
+                benchmark_mode=args.benchmark_mode,
                 fixed_new_tokens=args.fixed_new_tokens,
                 max_input_length=args.max_input_length,
                 device_memory_ratio=args.device_memory_ratio,
