@@ -362,6 +362,12 @@ def percentile(values: Sequence[float], pct: float) -> float:
     return float(np.percentile(np.asarray(values, dtype=np.float64), pct))
 
 
+def safe_ratio(numer: int | float, denom: int | float) -> float:
+    if denom <= 0:
+        return 0.0
+    return float(numer / denom)
+
+
 def summarize_hit_rate_tensor(raw: torch.Tensor | None) -> Dict[str, float | int]:
     if raw is None:
         return {}
@@ -385,11 +391,6 @@ def summarize_hit_rate_tensor(raw: torch.Tensor | None) -> Dict[str, float | int
     prefetch_count = int(matrix[:, 7].sum().item())
     sparse_node_count = int((matrix[:, 10] > 0).sum().item()) if matrix.size(1) > 10 else 0
 
-    def _safe_ratio(numer: int, denom: int) -> float:
-        if denom <= 0:
-            return 0.0
-        return float(numer / denom)
-
     return {
         "visit_count": visit_count,
         "gpu_visit_count": gpu_visit_count,
@@ -399,9 +400,9 @@ def summarize_hit_rate_tensor(raw: torch.Tensor | None) -> Dict[str, float | int
         "cpu_hit_count": cpu_hit_count,
         "prefetch_count": prefetch_count,
         "sparse_node_count": sparse_node_count,
-        "overall_hit_rate": _safe_ratio(hit_count, visit_count),
-        "gpu_hit_rate": _safe_ratio(gpu_hit_count, gpu_visit_count),
-        "cpu_hit_rate": _safe_ratio(cpu_hit_count, cpu_visit_count),
+        "overall_hit_rate": safe_ratio(hit_count, visit_count),
+        "gpu_hit_rate": safe_ratio(gpu_hit_count, gpu_visit_count),
+        "cpu_hit_rate": safe_ratio(cpu_hit_count, cpu_visit_count),
     }
 
 
@@ -689,8 +690,47 @@ def aggregate_request_records(
     request_count = len(request_records)
     prefetch_candidate_count_total = int(sum(prefetch_candidate_counts))
     prefetch_admitted_count_total = int(sum(prefetch_admitted_counts))
+    prefetch_enqueue_count_total = int(sum(prefetch_enqueue_counts))
     prefetch_drop_cap_count_total = int(sum(prefetch_drop_cap_counts))
     prefetch_drop_pressure_count_total = int(sum(prefetch_drop_pressure_counts))
+    prefetch_runtime_queue_push_count_total = int(
+        prefetch_runtime_totals.get("prefetch_runtime_queue_push_count_total", 0)
+    )
+    prefetch_runtime_dequeue_count_total = int(
+        prefetch_runtime_totals.get("prefetch_runtime_dequeue_count_total", 0)
+    )
+    prefetch_runtime_complete_count_total = int(
+        prefetch_runtime_totals.get("prefetch_runtime_complete_count_total", 0)
+    )
+    prefetch_runtime_queue_cleared_task_count_total = int(
+        prefetch_runtime_totals.get(
+            "prefetch_runtime_queue_cleared_task_count_total", 0
+        )
+    )
+    dispatcher_prefetch_resident_hit_count_total = int(
+        sum(prefetch_resident_hit_counts)
+    )
+    dispatcher_late_prefetch_demand_miss_count_total = int(
+        sum(late_prefetch_demand_miss_counts)
+    )
+    prefetch_used_per_candidate = safe_ratio(
+        dispatcher_prefetch_resident_hit_count_total,
+        prefetch_candidate_count_total,
+    )
+    prefetch_used_per_admitted = safe_ratio(
+        dispatcher_prefetch_resident_hit_count_total,
+        prefetch_admitted_count_total,
+    )
+    prefetch_used_per_completed = safe_ratio(
+        dispatcher_prefetch_resident_hit_count_total,
+        prefetch_runtime_complete_count_total,
+    )
+    if prefetch_candidate_count_total <= 0:
+        prefetch_lifecycle_status = "no_prefetch_candidates"
+    elif prefetch_used_per_candidate < 0.05:
+        prefetch_lifecycle_status = "low_useful_conversion"
+    else:
+        prefetch_lifecycle_status = "has_useful_conversion"
     return {
         "request_count": request_count,
         "success_count": request_count,
@@ -736,12 +776,8 @@ def aggregate_request_records(
         "dispatcher_pending_wait_count_total": int(sum(pending_wait_counts)),
         "dispatcher_pending_wait_total_us": int(sum(pending_wait_total_us)),
         "dispatcher_pending_stall_count_total": int(sum(pending_stall_counts)),
-        "dispatcher_prefetch_resident_hit_count_total": int(
-            sum(prefetch_resident_hit_counts)
-        ),
-        "dispatcher_late_prefetch_demand_miss_count_total": int(
-            sum(late_prefetch_demand_miss_counts)
-        ),
+        "dispatcher_prefetch_resident_hit_count_total": dispatcher_prefetch_resident_hit_count_total,
+        "dispatcher_late_prefetch_demand_miss_count_total": dispatcher_late_prefetch_demand_miss_count_total,
         "dispatcher_demand_candidate_protect_skip_count_total": int(
             sum(demand_candidate_protect_skip_counts)
         ),
@@ -756,7 +792,7 @@ def aggregate_request_records(
         ),
         "prefetch_candidate_count_total": prefetch_candidate_count_total,
         "prefetch_admitted_count_total": prefetch_admitted_count_total,
-        "prefetch_enqueue_count_total": int(sum(prefetch_enqueue_counts)),
+        "prefetch_enqueue_count_total": prefetch_enqueue_count_total,
         "prefetch_drop_count_total": int(sum(prefetch_drop_counts)),
         "prefetch_drop_cap_count_total": prefetch_drop_cap_count_total,
         "prefetch_drop_pressure_count_total": prefetch_drop_pressure_count_total,
@@ -791,15 +827,40 @@ def aggregate_request_records(
             sum(prefetch_plan_cleared_candidate_counts)
         ),
         **prefetch_runtime_totals,
-        "prefetch_admit_rate": (
-            float(prefetch_admitted_count_total / prefetch_candidate_count_total)
-            if prefetch_candidate_count_total
-            else 0.0
+        "prefetch_admit_rate": safe_ratio(
+            prefetch_admitted_count_total, prefetch_candidate_count_total
         ),
-        "prefetch_pressure_drop_rate": (
-            float(prefetch_drop_pressure_count_total / prefetch_candidate_count_total)
-            if prefetch_candidate_count_total
-            else 0.0
+        "prefetch_enqueue_per_admitted": safe_ratio(
+            prefetch_enqueue_count_total, prefetch_admitted_count_total
+        ),
+        "prefetch_queue_push_per_enqueue": safe_ratio(
+            prefetch_runtime_queue_push_count_total, prefetch_enqueue_count_total
+        ),
+        "prefetch_dequeue_per_queue_push": safe_ratio(
+            prefetch_runtime_dequeue_count_total,
+            prefetch_runtime_queue_push_count_total,
+        ),
+        "prefetch_complete_per_queue_push": safe_ratio(
+            prefetch_runtime_complete_count_total,
+            prefetch_runtime_queue_push_count_total,
+        ),
+        "prefetch_complete_per_admitted": safe_ratio(
+            prefetch_runtime_complete_count_total, prefetch_admitted_count_total
+        ),
+        "prefetch_used_per_candidate": prefetch_used_per_candidate,
+        "prefetch_used_per_admitted": prefetch_used_per_admitted,
+        "prefetch_used_per_completed": prefetch_used_per_completed,
+        "prefetch_late_miss_per_candidate": safe_ratio(
+            dispatcher_late_prefetch_demand_miss_count_total,
+            prefetch_candidate_count_total,
+        ),
+        "prefetch_queue_cleared_per_queue_push": safe_ratio(
+            prefetch_runtime_queue_cleared_task_count_total,
+            prefetch_runtime_queue_push_count_total,
+        ),
+        "prefetch_lifecycle_status": prefetch_lifecycle_status,
+        "prefetch_pressure_drop_rate": safe_ratio(
+            prefetch_drop_pressure_count_total, prefetch_candidate_count_total
         ),
         "pressure_locked_max": (
             int(max(pressure_locked_max_values)) if pressure_locked_max_values else 0
@@ -1102,6 +1163,54 @@ def render_markdown_summary(
                     locked_max=agg.get("pressure_locked_max", 0),
                     evict_min=agg.get("pressure_evictable_min", 0),
                     hit=agg["mean_cache_hit_rate"],
+                )
+            )
+
+        lines.extend(
+            [
+                "",
+                "### Prefetch Lifecycle",
+                "",
+                "| Variant | status | candidates | admitted | queue push | complete | resident hit | late miss | admit/cand | complete/admit | used/cand | used/admit | used/complete | queue cleared/push |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for variant in benchmark_summary["variants"]:
+            agg = current[variant]["aggregate"]
+            lines.append(
+                "| {variant} | {status} | {candidates} | {admitted} | {queue_push} | {complete} | {resident_hit} | {late_miss} | {admit_rate:.4f} | {complete_admit:.4f} | {used_candidate:.4f} | {used_admitted:.4f} | {used_complete:.4f} | {queue_cleared_push:.4f} |".format(
+                    variant=variant,
+                    status=agg.get("prefetch_lifecycle_status", ""),
+                    candidates=agg.get("prefetch_candidate_count_total", 0),
+                    admitted=agg.get("prefetch_admitted_count_total", 0),
+                    queue_push=agg.get(
+                        "prefetch_runtime_queue_push_count_total",
+                        0,
+                    ),
+                    complete=agg.get(
+                        "prefetch_runtime_complete_count_total",
+                        0,
+                    ),
+                    resident_hit=agg.get(
+                        "dispatcher_prefetch_resident_hit_count_total",
+                        0,
+                    ),
+                    late_miss=agg.get(
+                        "dispatcher_late_prefetch_demand_miss_count_total",
+                        0,
+                    ),
+                    admit_rate=agg.get("prefetch_admit_rate", 0.0),
+                    complete_admit=agg.get(
+                        "prefetch_complete_per_admitted",
+                        0.0,
+                    ),
+                    used_candidate=agg.get("prefetch_used_per_candidate", 0.0),
+                    used_admitted=agg.get("prefetch_used_per_admitted", 0.0),
+                    used_complete=agg.get("prefetch_used_per_completed", 0.0),
+                    queue_cleared_push=agg.get(
+                        "prefetch_queue_cleared_per_queue_push",
+                        0.0,
+                    ),
                 )
             )
 

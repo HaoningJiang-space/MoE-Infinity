@@ -15,6 +15,50 @@ v43-v47 之后，HPCA 方向需要更克制：
 
 > MoE expert speculation 的关键问题不是“这个 predictor 稍微更准”，而是 speculative expert traffic 的生命周期转化率、deadline、credit/admission 和 demand progress contract。当前 local-continuation prefetch 实现是一个负例：它证明无约束同步 speculation 会制造大量无效 traffic，而不是证明 local continuation 已经能加速。
 
+## 2026-04-29 公平实验协议
+
+后续所有可以写进 paper 的 runtime 结论，必须先满足下面协议。没有满足协议的结果只能作为 debug 或 observation，不能写成方法收益。
+
+### 固定输入优先
+
+- 正式性能比较优先使用 `benchmark_mode=forward`。
+- `generate` 只用于功能 smoke 或端到端可运行性检查，不能作为机制性能主证据。
+- 每个 bracket 内必须固定 seed、trace、input length、device memory ratio、offload cache mode 和 visible GPU。
+- 每个 experimental case 前后都要夹 on-demand baseline，至少报告 normalized-to-bracket baseline。
+
+### 生命周期优先于 tok/s
+
+每个 prefetch 机制必须报告完整生命周期：
+
+- candidates
+- admitted
+- queue push
+- completed
+- resident hit
+- late miss
+- `used/candidate`
+- `used/admitted`
+- `used/complete`
+
+如果 `used/candidate < 5%`，该 run 只能解释为 speculative traffic 负例，不能声称 prefetch acceleration。
+
+### Baseline 约束
+
+- 默认 benchmark variant 必须保持 `on_demand`，实验 prefetch variant 必须显式指定。
+- `trace_similarity_prefetch` 只有在 candidate/admit 非空时才可作为 prefetch baseline，否则只能说该配置下 tracebase 未生效。
+- 当前 `history_reuse_local_backbone` 是 experimental diagnostic path，不是稳定方法。
+
+### Go / No-Go 门槛
+
+一个 HPCA/System 机制要继续推进，至少要同时满足：
+
+- forward-mode lifecycle 中 `used/candidate` 明显高于当前 local runtime 负例。
+- bracket-normalized tok/s 至少稳定优于 on-demand，且跨重复 run 方向一致。
+- 强 pressure 下没有 pending stall、all-locked fatal 或 no-victim runaway。
+- overhead breakdown 能说明收益来自机制本身，而不是输入长度、EOS、模型加载或 offload cache 差异。
+
+当前最重要的负结果是 v47：local continuation candidate 质量在 score-only 下更好，但同步 real prefetch 的 lifecycle 转化率极低。这说明下一步不能继续调一个更复杂 predictor，而要先解决 speculative traffic 为什么不能 timely/usefully 转化。
+
 ## 核心转向
 
 这份文档把原来的 `continuation cache / continuation-aware paging` 方向，重构成更适合 HPCA 的硬件/软件协同故事。
