@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
+from moe_infinity.utils.qwen_benchmark import qwen_benchmark_variant_status
+
 
 DEFAULT_TRACES = ["mixed", "recurrence_heavy", "stationary"]
 DEFAULT_VARIANTS = [
@@ -117,6 +119,24 @@ def _progress_counters_available(raw: Mapping[str, Any]) -> bool:
     )
 
 
+def _benchmark_mode(raw: Mapping[str, Any]) -> str:
+    return str(raw.get("benchmark_mode", "generate"))
+
+
+def _performance_comparison_allowed(
+    lhs: Mapping[str, Any],
+    rhs: Mapping[str, Any],
+) -> bool:
+    return (
+        lhs.get("benchmark_mode") == "forward"
+        and rhs.get("benchmark_mode") == "forward"
+        and lhs.get("benchmark_variant_status") == "stable"
+        and rhs.get("benchmark_variant_status") == "stable"
+        and lhs.get("pressure_label") != "progress-boundary"
+        and rhs.get("pressure_label") != "progress-boundary"
+    )
+
+
 def _pressure_label(
     status: str,
     aggregate: Mapping[str, Any],
@@ -162,6 +182,11 @@ def _case_summary(
         "raw_path": str(raw_path) if raw_path.is_file() else None,
         "log_path": str(log_path) if log_path.is_file() else None,
         "has_progress_counters": _progress_counters_available(raw),
+        "benchmark_mode": _benchmark_mode(raw),
+        "benchmark_variant_status": raw.get(
+            "benchmark_variant_status",
+            qwen_benchmark_variant_status(variant),
+        ),
         "aggregate": aggregate,
         "fixed_new_tokens": raw.get("fixed_new_tokens"),
         "max_new_tokens": raw.get("max_new_tokens"),
@@ -197,35 +222,57 @@ def _build_comparisons(cases: list[Mapping[str, Any]]) -> list[Dict[str, Any]]:
                 if baseline is None or baseline.get("status") != "complete":
                     continue
                 baseline_agg = baseline.get("aggregate", {})
+                performance_allowed = _performance_comparison_allowed(
+                    local,
+                    baseline,
+                )
                 comparisons.append(
                     {
                         "ratio": ratio,
                         "trace_name": trace_name,
                         "lhs_variant": LOCAL_VARIANT,
                         "rhs_variant": baseline_name,
-                        "tokens_per_second_delta_pct": _pct_delta(
-                            _safe_float(
-                                local_agg.get("generated_tokens_per_second")
-                            ),
-                            _safe_float(
-                                baseline_agg.get("generated_tokens_per_second")
-                            ),
+                        "performance_comparison_allowed": performance_allowed,
+                        "performance_guardrail": (
+                            "ok"
+                            if performance_allowed
+                            else "performance deltas suppressed unless both cases are stable forward-mode non-boundary results"
                         ),
-                        "latency_per_token_delta_pct": _pct_delta(
-                            _safe_float(
-                                local_agg.get(
-                                    "latency_per_generated_token_mean_ms"
-                                )
-                            ),
-                            _safe_float(
-                                baseline_agg.get(
-                                    "latency_per_generated_token_mean_ms"
-                                )
-                            ),
+                        "tokens_per_second_delta_pct": (
+                            _pct_delta(
+                                _safe_float(
+                                    local_agg.get("generated_tokens_per_second")
+                                ),
+                                _safe_float(
+                                    baseline_agg.get("generated_tokens_per_second")
+                                ),
+                            )
+                            if performance_allowed
+                            else None
                         ),
-                        "p95_latency_delta_pct": _pct_delta(
-                            _safe_float(local_agg.get("latency_p95_s")),
-                            _safe_float(baseline_agg.get("latency_p95_s")),
+                        "latency_per_token_delta_pct": (
+                            _pct_delta(
+                                _safe_float(
+                                    local_agg.get(
+                                        "latency_per_generated_token_mean_ms"
+                                    )
+                                ),
+                                _safe_float(
+                                    baseline_agg.get(
+                                        "latency_per_generated_token_mean_ms"
+                                    )
+                                ),
+                            )
+                            if performance_allowed
+                            else None
+                        ),
+                        "p95_latency_delta_pct": (
+                            _pct_delta(
+                                _safe_float(local_agg.get("latency_p95_s")),
+                                _safe_float(baseline_agg.get("latency_p95_s")),
+                            )
+                            if performance_allowed
+                            else None
                         ),
                     }
                 )
@@ -335,17 +382,19 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "",
             "## Cases",
             "",
-            "| Ratio | Trace | Variant | Status | Pressure label | counters | tok/s | mean ms/tok | p95 s | hit rate | busy waits | evictions | all-locked | no-victim us |",
-            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Ratio | Trace | Variant | Mode | Variant status | Status | Pressure label | counters | tok/s | mean ms/tok | p95 s | hit rate | busy waits | evictions | all-locked | no-victim us |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
         lines.append(
-            "| {ratio} | {trace} | {variant} | {status} | {label} | {counters} | {tps} | {ms_tok} | {p95} | {hit} | {busy} | {evict} | {all_locked} | {no_victim_us} |".format(
+            "| {ratio} | {trace} | {variant} | {mode} | {variant_status} | {status} | {label} | {counters} | {tps} | {ms_tok} | {p95} | {hit} | {busy} | {evict} | {all_locked} | {no_victim_us} |".format(
                 ratio=case["ratio"],
                 trace=case["trace_name"],
                 variant=case["variant"],
+                mode=case.get("benchmark_mode", "generate"),
+                variant_status=case.get("benchmark_variant_status", "experimental"),
                 status=case["status"],
                 label=case["pressure_label"],
                 counters=str(case["has_progress_counters"]).lower(),
@@ -371,16 +420,19 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "",
             "## Local Comparisons",
             "",
-            "| Ratio | Trace | Local vs | tok/s delta % | mean ms/tok delta % | p95 delta % |",
-            "| --- | --- | --- | ---: | ---: | ---: |",
+            "| Ratio | Trace | Local vs | Perf allowed | tok/s delta % | mean ms/tok delta % | p95 delta % |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: |",
         ]
     )
     for comparison in summary["comparisons"]:
         lines.append(
-            "| {ratio} | {trace} | {rhs} | {tps} | {ms_tok} | {p95} |".format(
+            "| {ratio} | {trace} | {rhs} | {allowed} | {tps} | {ms_tok} | {p95} |".format(
                 ratio=comparison["ratio"],
                 trace=comparison["trace_name"],
                 rhs=comparison["rhs_variant"],
+                allowed=str(
+                    comparison.get("performance_comparison_allowed", False)
+                ).lower(),
                 tps=_fmt(comparison.get("tokens_per_second_delta_pct"), 2),
                 ms_tok=_fmt(comparison.get("latency_per_token_delta_pct"), 2),
                 p95=_fmt(comparison.get("p95_latency_delta_pct"), 2),
@@ -395,6 +447,7 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "- `non-pressure/control` means the case completed with near-perfect cache hits and no observed dispatcher pressure; it should not be used as main paging-pressure evidence.",
             "- `progress-boundary` means the run observed all-locked/no-victim progress pressure and should be treated as robustness evidence, not a normal performance point.",
             "- `partial` and `missing` rows are included so an in-flight sweep can be inspected without waiting for every case to finish.",
+            "- Local-vs-baseline performance deltas are suppressed unless both cases are stable forward-mode non-boundary results.",
             "",
         ]
     )

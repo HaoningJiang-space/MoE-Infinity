@@ -60,7 +60,7 @@ expert prediction / prefetch / cache / paging 这条线已经很挤。相关工�
 
 - v6 score-only: local continuation 明显提高 same-step recall，降低 omission gap，但最初 decision latency 偏高。
 - v7 acceleration: local path decision latency 从约 2.5ms 降到约 0.6ms，说明工程瓶颈主要是实现方式，不是 object 本身错。
-- v8 runtime: `history_reuse_local_backbone` 在真实 runtime 下已经能和 consensus/backbone 对比，recurrence-heavy 上收益明显。
+- v8 runtime: 早期 `generate` 模式结果只能说明 local continuation 路径可运行；v43-v47 后不再把它作为性能收益证据。
 - v9 score-only object-vs-controller: local continuation + simple ranking 稳定打过 sequence object + 更复杂 controller/retrieval。
 
 v9 是目前最干净的 object-vs-controller 证据：
@@ -166,7 +166,7 @@ Continuation Cache for MoE Expert Paging
 
 - 证明 retrieval object mismatch 是 decode-time expert paging 的主失败模式。
 - 用 omission-gap decomposition 区分 candidate generation 和 ranking/controller。
-- 用 continuation cache 降低 omission gap，并转化为 runtime latency / stall 改善。
+- 用 continuation cache 降低 omission gap；runtime 加速必须由后续 fixed-input forward benchmark 和 lifecycle counters 单独证明。
 
 当前实验状态：
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
 from moe_infinity.analysis.phasea import analyze_phasea_event_file
+from moe_infinity.utils.qwen_benchmark import qwen_benchmark_variant_status
 
 
 VARIANT_LABELS = {
@@ -108,6 +109,18 @@ def _same_step_metrics(
     }
 
 
+def _benchmark_mode(raw: Mapping[str, Any]) -> str:
+    return str(raw.get("benchmark_mode", "generate"))
+
+
+def _performance_comparison_allowed(*cases: Mapping[str, Any]) -> bool:
+    return all(
+        case.get("benchmark_mode") == "forward"
+        and case.get("benchmark_variant_status") == "stable"
+        for case in cases
+    )
+
+
 def _compact_case(
     *,
     raw_path: Path,
@@ -139,6 +152,11 @@ def _compact_case(
         "trace_name": trace_name,
         "variant": variant,
         "object_label": VARIANT_LABELS.get(variant, variant),
+        "benchmark_mode": _benchmark_mode(raw),
+        "benchmark_variant_status": raw.get(
+            "benchmark_variant_status",
+            qwen_benchmark_variant_status(variant),
+        ),
         "raw_path": str(raw_path),
         "event_path": str(event_path) if event_path.is_file() else None,
         "fixed_tokens": _fixed_token_status(raw),
@@ -168,21 +186,40 @@ def _comparison(
     rhs_agg = rhs.get("aggregate", {})
     lhs_phasea = lhs.get("phasea_same_step", {})
     rhs_phasea = rhs.get("phasea_same_step", {})
+    performance_allowed = _performance_comparison_allowed(lhs, rhs)
     return {
         "trace_name": trace_name,
         "lhs_variant": lhs["variant"],
         "rhs_variant": rhs["variant"],
-        "latency_per_token_delta_pct": _pct_delta(
-            _safe_float(lhs_agg.get("latency_per_generated_token_mean_ms")),
-            _safe_float(rhs_agg.get("latency_per_generated_token_mean_ms")),
+        "performance_comparison_allowed": performance_allowed,
+        "performance_guardrail": (
+            "ok"
+            if performance_allowed
+            else "performance deltas suppressed unless both cases are stable forward-mode results"
         ),
-        "tokens_per_second_delta_pct": _pct_delta(
-            _safe_float(lhs_agg.get("generated_tokens_per_second")),
-            _safe_float(rhs_agg.get("generated_tokens_per_second")),
+        "latency_per_token_delta_pct": (
+            _pct_delta(
+                _safe_float(lhs_agg.get("latency_per_generated_token_mean_ms")),
+                _safe_float(rhs_agg.get("latency_per_generated_token_mean_ms")),
+            )
+            if performance_allowed
+            else None
         ),
-        "p95_latency_delta_pct": _pct_delta(
-            _safe_float(lhs_agg.get("latency_p95_s")),
-            _safe_float(rhs_agg.get("latency_p95_s")),
+        "tokens_per_second_delta_pct": (
+            _pct_delta(
+                _safe_float(lhs_agg.get("generated_tokens_per_second")),
+                _safe_float(rhs_agg.get("generated_tokens_per_second")),
+            )
+            if performance_allowed
+            else None
+        ),
+        "p95_latency_delta_pct": (
+            _pct_delta(
+                _safe_float(lhs_agg.get("latency_p95_s")),
+                _safe_float(rhs_agg.get("latency_p95_s")),
+            )
+            if performance_allowed
+            else None
         ),
         "pair_recall_delta": _safe_float(lhs_phasea.get("pair_recall"))
         - _safe_float(rhs_phasea.get("pair_recall")),
@@ -233,11 +270,12 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         f"- Benchmark root: `{summary['benchmark_root']}`",
         f"- Exclude warmup events: `{str(summary['exclude_warmup_events']).lower()}`",
         f"- Same-step budget: `M{summary['same_step_budget']}`",
+        "- Performance deltas are suppressed unless both cases are stable `benchmark_mode=forward` results.",
         "",
         "## Cases",
         "",
-        "| Trace | Variant | Object label | Fixed tokens | tok/s | mean ms/tok | p95 latency (s) | busy waits | evictions | all-locked | no-victim us | event mean us | M32 pair | M32 expert | M32 omission | M32 restricted |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Trace | Variant | Object label | Mode | Status | Fixed tokens | tok/s | mean ms/tok | p95 latency (s) | busy waits | evictions | all-locked | no-victim us | event mean us | M32 pair | M32 expert | M32 omission | M32 restricted |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for case in summary["cases"]:
         aggregate = case.get("aggregate", {})
@@ -245,10 +283,12 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
         controller = case.get("controller_latency", {})
         fixed = case.get("fixed_tokens", {})
         lines.append(
-            "| {trace} | {variant} | {label} | {fixed} | {tps} | {ms_tok} | {p95} | {busy} | {evict} | {all_locked} | {no_victim_us} | {event_us} | {pair} | {expert} | {omit} | {restricted} |".format(
+            "| {trace} | {variant} | {label} | {mode} | {status} | {fixed} | {tps} | {ms_tok} | {p95} | {busy} | {evict} | {all_locked} | {no_victim_us} | {event_us} | {pair} | {expert} | {omit} | {restricted} |".format(
                 trace=case["trace_name"],
                 variant=case["variant"],
                 label=case["object_label"],
+                mode=case.get("benchmark_mode", "generate"),
+                status=case.get("benchmark_variant_status", "experimental"),
                 fixed=str(fixed.get("all_measured_fixed_length", False)).lower(),
                 tps=_fmt(aggregate.get("generated_tokens_per_second"), 3),
                 ms_tok=_fmt(aggregate.get("latency_per_generated_token_mean_ms"), 3),
@@ -274,15 +314,16 @@ def _render_markdown(summary: Mapping[str, Any]) -> str:
             "",
             "## Local Comparisons",
             "",
-            "| Trace | Local vs | ms/tok delta % | tok/s delta % | p95 delta % | pair delta | expert delta | omission delta | restricted delta |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Trace | Local vs | Perf allowed | ms/tok delta % | tok/s delta % | p95 delta % | pair delta | expert delta | omission delta | restricted delta |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for item in summary["comparisons"]:
         lines.append(
-            "| {trace} | {rhs} | {ms} | {tps} | {p95} | {pair} | {expert} | {omit} | {restricted} |".format(
+            "| {trace} | {rhs} | {allowed} | {ms} | {tps} | {p95} | {pair} | {expert} | {omit} | {restricted} |".format(
                 trace=item["trace_name"],
                 rhs=item["rhs_variant"],
+                allowed=str(item.get("performance_comparison_allowed", False)).lower(),
                 ms=_fmt(item["latency_per_token_delta_pct"], 2),
                 tps=_fmt(item["tokens_per_second_delta_pct"], 2),
                 p95=_fmt(item["p95_latency_delta_pct"], 2),
