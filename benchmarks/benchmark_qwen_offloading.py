@@ -17,6 +17,7 @@ from moe_infinity import MoE
 from moe_infinity.analysis.phasea import PhaseAObservationRecorder
 from moe_infinity.utils.qwen_benchmark import (
     QWEN_BENCHMARK_VARIANTS,
+    QWEN_DEFAULT_BENCHMARK_VARIANTS,
     aggregate_request_records,
     build_env_note,
     build_qwen_benchmark_config,
@@ -53,8 +54,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=list(QWEN_BENCHMARK_VARIANTS),
+        default=list(QWEN_DEFAULT_BENCHMARK_VARIANTS),
         choices=list(QWEN_BENCHMARK_VARIANTS),
+        help=(
+            "Benchmark variants to run. Defaults to the stable on-demand "
+            "baseline; prefetch variants are experimental and must be "
+            "requested explicitly."
+        ),
     )
     parser.add_argument("--traces", nargs="+", default=None)
     parser.add_argument("--warmup-requests", type=int, default=2)

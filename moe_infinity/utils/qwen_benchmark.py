@@ -33,6 +33,12 @@ QWEN_BENCHMARK_VARIANTS = (
     "history_reuse_backbone_score",
 )
 
+QWEN_DEFAULT_BENCHMARK_VARIANTS = ("on_demand",)
+
+QWEN_EXPERIMENTAL_BENCHMARK_VARIANTS = tuple(
+    variant for variant in QWEN_BENCHMARK_VARIANTS if variant != "on_demand"
+)
+
 
 @dataclass(frozen=True)
 class QwenTraceRequest:
@@ -178,6 +184,11 @@ def build_qwen_benchmark_config(
         "offload_path": offload_path,
         "device_memory_ratio": device_memory_ratio,
         "num_threads": num_threads,
+        "benchmark_variant_status": (
+            "stable"
+            if variant in QWEN_DEFAULT_BENCHMARK_VARIANTS
+            else "experimental"
+        ),
         "prefetch": prefetch,
         "policy_score_only": policy_score_only,
         "offloading_policy": offloading_policy,
@@ -958,6 +969,18 @@ def render_markdown_summary(
     *,
     benchmark_summary: Mapping[str, Any],
 ) -> str:
+    modes = sorted(
+        {
+            str(result.get("benchmark_mode", "generate"))
+            for trace_name in benchmark_summary["traces"]
+            for result in benchmark_summary["trace_results"][trace_name].values()
+        }
+    )
+    experimental_variants = [
+        variant
+        for variant in benchmark_summary["variants"]
+        if variant in QWEN_EXPERIMENTAL_BENCHMARK_VARIANTS
+    ]
     lines = [
         "# Qwen Offloading Benchmark v1",
         "",
@@ -965,6 +988,13 @@ def render_markdown_summary(
         f"- Timestamp (UTC): `{benchmark_summary['env']['timestamp_utc']}`",
         f"- Variants: `{', '.join(benchmark_summary['variants'])}`",
         f"- Traces: `{', '.join(benchmark_summary['traces'])}`",
+        f"- Benchmark modes: `{', '.join(modes)}`",
+        "",
+        "## Result Guardrails",
+        "",
+        "- Formal performance comparisons should use `benchmark_mode=forward`; `generate` is autoregressive and can change future routing after small numeric/runtime differences.",
+        "- Experimental prefetch variants are retained for diagnosis and reproduction, but are not stable mainline methods unless a forward-mode lifecycle run shows useful prefetch conversion.",
+        f"- Experimental variants in this run: `{', '.join(experimental_variants) if experimental_variants else 'none'}`",
         "",
     ]
     trace_results = benchmark_summary["trace_results"]
@@ -1076,36 +1106,10 @@ def render_markdown_summary(
                 )
             )
 
-        trace_prefetch = current.get("trace_similarity_prefetch", {}).get(
-            "aggregate", {}
-        ).get("generated_tokens_per_second", 0.0)
-        history_prefetch = current.get("history_reuse_prefetch", {}).get(
-            "aggregate", {}
-        ).get("generated_tokens_per_second", 0.0)
-        history_backbone = current.get("history_reuse_backbone", {}).get(
-            "aggregate", {}
-        ).get("generated_tokens_per_second", 0.0)
-        history_help = (
-            history_prefetch > trace_prefetch
-            if "trace_similarity_prefetch" in current
-            and "history_reuse_prefetch" in current
-            else False
-        )
-        backbone_help = (
-            history_backbone > history_prefetch
-            if "history_reuse_prefetch" in current
-            and "history_reuse_backbone" in current
-            else False
-        )
-        recurrence_note = "n/a"
-        if trace_name == "recurrence_heavy":
-            recurrence_note = (
-                "yes" if history_backbone > trace_prefetch else "no"
-            )
         lines.extend(
             [
                 "",
-                f"- Conclusion: history reuse helps = `{str(history_help).lower()}`; backbone restriction helps = `{str(backbone_help).lower()}`; recurrence amplification = `{recurrence_note}`.",
+                "- Interpretation: automatic history/backbone speedup conclusions are disabled; use forward-mode bracketed runs plus prefetch lifecycle counters for mechanism claims.",
                 "",
             ]
         )

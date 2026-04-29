@@ -2,6 +2,19 @@
 
 日期：2026-04-28
 
+## 2026-04-29 Runtime Guardrail
+
+v43-v47 之后，HPCA 方向需要更克制：
+
+- 不能再把当前 local-continuation runtime prefetch 当作正向加速机制。
+- v47 固定 forward 输入下，`history_reuse_local_backbone` 发出 `11008` 个 candidate/admit/enqueue，但只有约 `100` 个 prefetch resident hit，吞吐约为 baseline 的 `0.885x`。
+- `trace_similarity_prefetch` 当前 candidate/admit 为 `0`，不能作为有效 prefetch baseline。
+- `generate` 模式只用于功能 smoke；正式机制比较必须使用 fixed-input forward benchmark、bracketed baseline 和 lifecycle counters。
+
+当前可保留的 HPCA 主张是：
+
+> MoE expert speculation 的关键问题不是“这个 predictor 稍微更准”，而是 speculative expert traffic 的生命周期转化率、deadline、credit/admission 和 demand progress contract。当前 local-continuation prefetch 实现是一个负例：它证明无约束同步 speculation 会制造大量无效 traffic，而不是证明 local continuation 已经能加速。
+
 ## 核心转向
 
 这份文档把原来的 `continuation cache / continuation-aware paging` 方向，重构成更适合 HPCA 的硬件/软件协同故事。

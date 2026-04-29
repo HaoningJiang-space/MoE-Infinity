@@ -2,6 +2,19 @@
 
 Date: 2026-04-28
 
+## 2026-04-29 Runtime Guardrail
+
+v43-v47 之后，本文档里所有早期 runtime acceleration 说法都必须降级解释：
+
+- `generate` 模式不能作为机制比较主证据；跨进程输出路径不稳定，会污染 TPOT、miss 和 eviction。
+- 正式 runtime 对比必须优先使用 `benchmark_mode=forward` 的固定输入路径，并配合 bracketed baseline。
+- `history_reuse_local_backbone` 不能再写成当前加速机制；v47 中它 admitted `11008` 个 candidates，但只有约 `100` 个 used，吞吐只有 baseline 的约 `0.885x`。
+- `trace_similarity_prefetch` 当前 real run 中 candidate/admit 为 `0`，不能作为有效 MoE-Infinity prefetch baseline，除非先证明 tracebase 和 candidate 生成非空。
+
+因此当前可信主张是：
+
+> local continuation 仍可作为 retrieval-object mismatch 的观察证据；但当前同步 runtime prefetch 实现是负结果，只能作为“speculative expert traffic/lifecycle 转化率差”的诊断样本，不能作为主方法。
+
 ## 一句话主张
 
 当前最强主线不是“更好的 expert predictor”，而是：
