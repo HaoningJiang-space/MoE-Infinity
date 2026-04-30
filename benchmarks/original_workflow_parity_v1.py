@@ -134,8 +134,6 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
-import moe_infinity.memory.expert_prefetcher as expert_prefetcher_mod
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -154,19 +152,6 @@ def main() -> None:
         "fetch_experts_lock_cache_calls": 0,
     }
 
-    def wrap(method_name: str, counter_name: str) -> None:
-        original = getattr(expert_prefetcher_mod.ExpertPrefetcher, method_name)
-
-        def wrapped(self, *a, **kw):
-            counters[counter_name] += 1
-            return original(self, *a, **kw)
-
-        setattr(expert_prefetcher_mod.ExpertPrefetcher, method_name, wrapped)
-
-    wrap("prefetch_experts", "prefetch_experts_calls")
-    wrap("prefetch_experts_list", "prefetch_experts_list_calls")
-    wrap("fetch_experts_lock_cache", "fetch_experts_lock_cache_calls")
-
     result = {
         "model": args.model,
         "offload_path": args.offload_path,
@@ -177,7 +162,21 @@ def main() -> None:
         "prefetch_counters": counters,
     }
     try:
+        import moe_infinity.memory.expert_prefetcher as expert_prefetcher_mod
         from moe_infinity import MoE
+
+        def wrap(method_name: str, counter_name: str) -> None:
+            original = getattr(expert_prefetcher_mod.ExpertPrefetcher, method_name)
+
+            def wrapped(self, *a, **kw):
+                counters[counter_name] += 1
+                return original(self, *a, **kw)
+
+            setattr(expert_prefetcher_mod.ExpertPrefetcher, method_name, wrapped)
+
+        wrap("prefetch_experts", "prefetch_experts_calls")
+        wrap("prefetch_experts_list", "prefetch_experts_list_calls")
+        wrap("fetch_experts_lock_cache", "fetch_experts_lock_cache_calls")
 
         config = {
             "offload_path": args.offload_path,
