@@ -30,6 +30,7 @@ These must be separated before any HPCA/System claim is defensible.
 | v52 execution-mode ablation | Low-medium | Debug only | Partial run suggests `replace_only`, `enqueue_only`, and `replace_and_enqueue` differ sharply. It also exposed that mode semantics were not clean enough before fixing candidate eviction protection. |
 | v53 isolated full-copy ablation | Stop | No | Full 27GB per-case copies are too slow and disk-heavy on `/data`; do not use as the standard protocol. |
 | v54 retention-flag canary | Medium | Yes, as bug-fix validation | After fixing candidate protection, `replace_only_no_protect` no longer improves over on-demand, while `replace_only_with_protect` slightly lowers misses. `enqueue_only` performs real queue pushes but has very low resident-hit conversion and is slower. |
+| v55 corrected retention/transfer | Medium | Yes, mechanism diagnostic | Confirms true H2D enqueue has low resident-hit conversion and hurts latency in this setup. The best static protected case improves speed but has zero transfer opportunity, so it is retention/protection, not H2D prefetch. Eviction count is zero, so this is not final pressure-performance evidence. |
 
 ## Corrected Mechanism Interpretation
 
@@ -105,6 +106,20 @@ This is not yet a final performance table, but it validates the corrected
 semantics: candidate-set retention/protection and H2D prefetch transfer are
 different mechanisms and must not be reported under one `prefetch` number.
 
+The follow-up v55 corrected ablation should replace v27/v28/v52 for
+retention-vs-transfer interpretation. Its bracket baseline is about
+`152.9 tok/s`. The important outcomes are:
+
+- `static_replace_enqueue_with_protect` is about `1.09x` bracket baseline, but
+  has zero transfer opportunity and zero queue push, so the observed effect is
+  retention/protection only.
+- `static_enqueue_only` and `local_enqueue_only` perform real queue pushes and
+  completions, but resident-hit conversion is low and latency is worse.
+- `local_replace_enqueue_with_protect` has useful hits only when opportunities
+  become rare; it remains slower than on-demand.
+- all v55 cases have `evict=0`, so v55 remains a mechanism diagnostic rather
+  than a strong memory-pressure performance result.
+
 ## Research Direction After Audit
 
 The clean story is not "better expert predictor". The clean story is:
@@ -120,3 +135,16 @@ runtime contribution should be framed around expert paging semantics:
 - candidate retention is distinct from transfer;
 - admission must be opportunity-aware and progress-aware;
 - control-plane work must be credit-gated before synchronous trace update.
+
+## Named Experiment Protocol
+
+Stop adding opaque `vXX` runs for the next stage. Use named roots:
+
+- `original_workflow_parity_v1`: checks whether upstream open-source
+  MoE-Infinity actually enables the prefetch path for the target model.
+- `pressure_validated_retention_transfer_v1`: reruns the retention/transfer
+  mechanism split with explicit pressure labels.
+- `prefetch_lifecycle_timeliness_v1`: measures enqueue, dequeue, completion,
+  resident hit, and late miss as primary evidence.
+- `local_continuation_runtime_v1`: only runs after a validated pressure point
+  exists.
