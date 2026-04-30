@@ -31,7 +31,7 @@ UPSTREAM_REPO = Path(
 PYTHON = Path(
     os.environ.get(
         "ORIGINAL_UPSTREAM_BASELINE_PYTHON",
-        "/data/ziheng/conda_envs/moeinf-upstream/bin/python",
+        "/data/ziheng/conda_envs/moeinf-upstream-generate/bin/python",
     )
 )
 MODEL = Path(
@@ -46,7 +46,9 @@ TRACE_FILE = Path(
         str(FGO_REPO / "benchmarks/traces/qwen/mixed.jsonl"),
     )
 )
-CUDA_VISIBLE_DEVICES = os.environ.get("ORIGINAL_UPSTREAM_BASELINE_CUDA_VISIBLE_DEVICES", "0")
+CUDA_VISIBLE_DEVICES = os.environ.get(
+    "ORIGINAL_UPSTREAM_BASELINE_CUDA_VISIBLE_DEVICES", "0"
+)
 TIMEOUT_S = int(os.environ.get("ORIGINAL_UPSTREAM_BASELINE_TIMEOUT_S", "2400"))
 
 
@@ -60,11 +62,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _selected(values: Iterable[str] | None, env_key: str, default: List[str]) -> List[str]:
+def _selected(
+    values: Iterable[str] | None, env_key: str, default: List[str]
+) -> List[str]:
     if values:
         names = list(values)
     else:
-        names = [item.strip() for item in os.environ.get(env_key, "").split(",") if item.strip()]
+        names = [
+            item.strip()
+            for item in os.environ.get(env_key, "").split(",")
+            if item.strip()
+        ]
     return names or default
 
 
@@ -74,7 +82,10 @@ def _env() -> Dict[str, str]:
         {
             "CUDA_VISIBLE_DEVICES": CUDA_VISIBLE_DEVICES,
             "PYTHONPATH": str(UPSTREAM_REPO),
-            "PATH": f"{PYTHON.parent}:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin",
+            "PATH": (
+                f"{PYTHON.parent}:/usr/local/cuda-12.8/bin:"
+                "/usr/local/bin:/usr/bin:/bin"
+            ),
             "TMPDIR": "/data/ziheng/tmp",
             "TEMP": "/data/ziheng/tmp",
             "TMP": "/data/ziheng/tmp",
@@ -84,10 +95,10 @@ def _env() -> Dict[str, str]:
 
 
 def _write_runner(path: Path) -> None:
-    path.write_text(_UPSTREAM_RUNNER, encoding="utf-8")
+    path.write_text(_UPSTREAM_SOURCE_RUNNER, encoding="utf-8")
 
 
-_UPSTREAM_RUNNER = r'''
+_UPSTREAM_SOURCE_RUNNER = r'''
 from __future__ import annotations
 
 import argparse
@@ -101,7 +112,36 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TextStreamer
+
+
+class StopWatch(TextStreamer):
+    """Timing-only copy of the upstream example's streamer pattern."""
+
+    def __init__(self, engine, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.start_prefilling = None
+        self.prefilling_time = None
+        self.start_decoding = None
+        self.decoding_time = None
+        self.decoding_iterations = 0
+        self.engine = engine
+
+    def put(self, value):
+        if self.start_prefilling is None:
+            self.start_prefilling = time.time()
+            return
+        if self.prefilling_time is None:
+            self.prefilling_time = time.time() - self.start_prefilling
+            self.engine.expert_dispatcher.clear_expert_cache_counts()
+            self.start_decoding = time.time()
+        self.decoding_iterations += 1
+        return super().put(value)
+
+    def end(self):
+        if self.decoding_time is None and self.start_decoding is not None:
+            self.decoding_time = time.time() - self.start_decoding
+        return super().end()
 
 
 def percentile(values: List[float], pct: float) -> float:
@@ -149,88 +189,15 @@ def load_prompts(trace_file: Path, tokenizer: Any, measured_requests: int) -> Li
     return prompts
 
 
-def model_forward(model: Any, input_ids: torch.Tensor, **kwargs: Any) -> Any:
-    return model.model(input_ids, **kwargs)
-
-
-def run_one_request(
-    model: Any,
-    tokenizer: Any,
-    prompt: str,
-    *,
-    max_input_length: int,
-    max_new_tokens: int,
-) -> Dict[str, Any]:
-    encoded = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_input_length,
-    )
-    input_ids = encoded.input_ids.to("cuda:0")
-    model._configure_hook(input_ids)
-    model.model.eval()
-
-    torch.cuda.synchronize()
-    request_start = time.time()
-    prefill_start = time.time()
-    with torch.no_grad():
-        try:
-            outputs = model_forward(model, input_ids, use_cache=True)
-        except TypeError:
-            outputs = model_forward(model, input_ids)
-    torch.cuda.synchronize()
-    prefill_s = time.time() - prefill_start
-
-    logits = outputs.logits
-    past = getattr(outputs, "past_key_values", None)
-    next_token = torch.argmax(logits[:, -1, :], dim=-1)
-    current_ids = torch.cat([input_ids, next_token[:, None]], dim=-1)
-    generated = 1
-    decode_s = 0.0
-    decode_steps = 0
-    decode_mode = "kv_cache" if past is not None else "full_context_no_kv"
-    kv_failed = False
-
-    with torch.no_grad():
-        while generated < max_new_tokens:
-            torch.cuda.synchronize()
-            step_start = time.time()
-            if past is not None and not kv_failed:
-                try:
-                    outputs = model_forward(
-                        model,
-                        next_token[:, None],
-                        past_key_values=past,
-                        use_cache=True,
-                    )
-                except Exception:
-                    kv_failed = True
-                    decode_mode = "full_context_after_kv_failure"
-                    outputs = model_forward(model, current_ids)
-            else:
-                outputs = model_forward(model, current_ids)
-            torch.cuda.synchronize()
-            decode_s += time.time() - step_start
-            decode_steps += 1
-
-            logits = outputs.logits
-            past = getattr(outputs, "past_key_values", None) if not kv_failed else None
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-            current_ids = torch.cat([current_ids, next_token[:, None]], dim=-1)
-            generated += 1
-
-    torch.cuda.synchronize()
-    request_s = time.time() - request_start
-    return {
-        "input_tokens": int(input_ids.shape[-1]),
-        "generated_tokens": int(generated),
-        "decode_tokens": int(decode_steps),
-        "prefill_s": float(prefill_s),
-        "decode_s": float(decode_s),
-        "request_s": float(request_s),
-        "decode_mode": decode_mode,
-    }
+def custom_generate_kwargs(model_name: str, tokenizer: Any) -> Dict[str, Any]:
+    lower = model_name.lower()
+    if "switch" in lower:
+        return {"decoder_start_token_id": 0}
+    if "nllb" in lower:
+        return {"forced_bos_token_id": 256057}
+    if any(name in lower for name in ("mixtral", "arctic", "deepseek", "qwen3")):
+        return {"pad_token_id": tokenizer.eos_token_id}
+    return {}
 
 
 def main() -> None:
@@ -263,11 +230,14 @@ def main() -> None:
         "prefetch_flag": args.prefetch_flag,
         "phase": args.phase,
         "success": False,
+        "evidence_label": "source-only baseline",
+        "workflow": "upstream_moe_generate",
         "prefetch_counters": counters,
     }
 
     total_start = time.time()
     try:
+        import transformers
         import moe_infinity.memory.expert_prefetcher as expert_prefetcher_mod
         from moe_infinity import MoE
 
@@ -303,23 +273,49 @@ def main() -> None:
         setup_start = time.time()
         model = MoE(args.model, config)
         setup_s = time.time() - setup_start
+        generate_kwargs = custom_generate_kwargs(args.model, tokenizer)
 
-        records = [
-            run_one_request(
-                model,
-                tokenizer,
+        records = []
+        for prompt in prompts:
+            encoded = tokenizer(
                 prompt,
-                max_input_length=args.max_input_length,
-                max_new_tokens=args.max_new_tokens,
+                return_tensors="pt",
+                truncation=True,
+                max_length=args.max_input_length,
             )
-            for prompt in prompts
-        ]
+            input_ids = encoded.input_ids.to("cuda:0")
+            streamer = StopWatch(model.engine, tokenizer)
+            torch.cuda.synchronize()
+            request_start = time.time()
+            with torch.no_grad():
+                output_ids = model.generate(
+                    input_ids,
+                    streamer=streamer,
+                    max_new_tokens=args.max_new_tokens,
+                    min_new_tokens=args.max_new_tokens,
+                    do_sample=False,
+                    **generate_kwargs,
+                )
+            torch.cuda.synchronize()
+            request_s = time.time() - request_start
+            generated_tokens = max(0, int(output_ids.shape[-1] - input_ids.shape[-1]))
+            records.append(
+                {
+                    "input_tokens": int(input_ids.shape[-1]),
+                    "generated_tokens": generated_tokens,
+                    "prefill_s": float(streamer.prefilling_time or 0.0),
+                    "decode_s": float(streamer.decoding_time or 0.0),
+                    "decode_iterations": int(streamer.decoding_iterations),
+                    "request_s": float(request_s),
+                }
+            )
+
         total_wall_s = time.time() - total_start
         prefill_s = sum(float(item["prefill_s"]) for item in records)
         decode_s = sum(float(item["decode_s"]) for item in records)
         request_s = [float(item["request_s"]) for item in records]
         generated_tokens = sum(int(item["generated_tokens"]) for item in records)
-        decode_tokens = sum(int(item["decode_tokens"]) for item in records)
+        decode_tokens = sum(int(item["decode_iterations"]) for item in records)
         result.update(
             {
                 "success": True,
@@ -335,15 +331,17 @@ def main() -> None:
                 "request_latency_mean_s": statistics.mean(request_s) if request_s else 0.0,
                 "request_latency_p50_s": percentile(request_s, 50.0),
                 "request_latency_p95_s": percentile(request_s, 95.0),
-                "decode_modes": sorted({str(item["decode_mode"]) for item in records}),
                 "prefetch_counters": counters,
                 "records": records,
+                "torch_version": torch.__version__,
+                "transformers_version": transformers.__version__,
             }
         )
     except Exception as exc:
         result.update(
             {
                 "success": False,
+                "evidence_label": "environment failure",
                 "total_wall_s": time.time() - total_start,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
@@ -461,6 +459,7 @@ def _summarize(results: List[Dict[str, Any]]) -> None:
         "timestamp_utc": _now(),
         "root": str(ROOT),
         "upstream_repo": str(UPSTREAM_REPO),
+        "python": str(PYTHON),
         "model": str(MODEL),
         "trace_file": str(TRACE_FILE),
         "results": results,
@@ -473,17 +472,24 @@ def _summarize(results: List[Dict[str, Any]]) -> None:
     lines = [
         "# Original Upstream Baseline V1",
         "",
-        "This run measures the open-source upstream workflow only. It is not a reproduction of the paper tables.",
+        "This run is source-only: it calls upstream `MoE.generate()` and does",
+        "not use a custom decode loop, manual KV-cache propagation, or manual",
+        "prefetch calls.",
         "",
-        "| case | phase | status | decode TPOT ms | decode tok/s | wall s | setup s | requests | prefetch calls | modes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| case | phase | evidence | status | decode TPOT ms | decode tok/s | wall s | setup s | requests | prefetch calls | error |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in results:
-        status = "ok" if result.get("success") and int(result.get("returncode", 1)) == 0 else f"failed:{result.get('error_type', 'unknown')}"
+        status = (
+            "ok"
+            if result.get("success") and int(result.get("returncode", 1)) == 0
+            else f"failed:{result.get('error_type', 'unknown')}"
+        )
         lines.append(
-            "| {case} | {phase} | {status} | {tpot:.3f} | {tps:.3f} | {wall:.3f} | {setup:.3f} | {req} | {calls} | {modes} |".format(
+            "| {case} | {phase} | {label} | {status} | {tpot:.3f} | {tps:.3f} | {wall:.3f} | {setup:.3f} | {req} | {calls} | {error} |".format(
                 case=result.get("case", ""),
                 phase=result.get("phase", ""),
+                label=result.get("evidence_label", ""),
                 status=status,
                 tpot=float(result.get("decode_tpot_ms") or 0.0),
                 tps=float(result.get("decode_tokens_per_second") or 0.0),
@@ -491,7 +497,7 @@ def _summarize(results: List[Dict[str, Any]]) -> None:
                 setup=float(result.get("setup_s") or 0.0),
                 req=int(result.get("request_count") or 0),
                 calls=_prefetch_call_count(result),
-                modes=",".join(result.get("decode_modes", [])),
+                error=str(result.get("error", ""))[:120].replace("|", "/"),
             )
         )
     lines.extend(
@@ -499,9 +505,9 @@ def _summarize(results: List[Dict[str, Any]]) -> None:
             "",
             "Interpretation rules:",
             "",
-            "- `cold` includes fresh offload-store construction; do not compare its walltime with steady-state systems.",
-            "- `warm` reuses the offload store and is the main upstream-only steady-state baseline.",
-            "- If prefetch calls are zero, the open-source wrapper did not exercise activation-aware prefetch for this model.",
+            "- `source-only baseline` is valid baseline evidence only when status is `ok`.",
+            "- `environment failure` means the original source workflow failed; do not replace it with a custom decode loop for baseline tables.",
+            "- If prefetch calls are zero, the target upstream model path did not exercise activation-aware prefetch.",
         ]
     )
     (analysis / "original_upstream_baseline_v1.md").write_text(
@@ -511,13 +517,17 @@ def _summarize(results: List[Dict[str, Any]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run open-source upstream MoE-Infinity baseline.")
+    parser = argparse.ArgumentParser(
+        description="Run source-only upstream MoE-Infinity baseline."
+    )
     parser.add_argument("--cases", nargs="+", choices=list(CASES))
     parser.add_argument("--phases", nargs="+", choices=("cold", "warm"))
     parser.add_argument(
         "--measured-requests",
         type=int,
-        default=int(os.environ.get("ORIGINAL_UPSTREAM_BASELINE_MEASURED_REQUESTS", "16")),
+        default=int(
+            os.environ.get("ORIGINAL_UPSTREAM_BASELINE_MEASURED_REQUESTS", "16")
+        ),
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -527,12 +537,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-input-length",
         type=int,
-        default=int(os.environ.get("ORIGINAL_UPSTREAM_BASELINE_MAX_INPUT_LENGTH", "128")),
+        default=int(
+            os.environ.get("ORIGINAL_UPSTREAM_BASELINE_MAX_INPUT_LENGTH", "128")
+        ),
     )
     parser.add_argument(
         "--device-memory-ratio",
         type=float,
-        default=float(os.environ.get("ORIGINAL_UPSTREAM_BASELINE_DEVICE_MEMORY_RATIO", "0.60")),
+        default=float(
+            os.environ.get("ORIGINAL_UPSTREAM_BASELINE_DEVICE_MEMORY_RATIO", "0.60")
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -541,10 +555,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
-    runner = ROOT / "upstream_manual_decode_runner.py"
+    runner = ROOT / "upstream_source_generate_runner.py"
     _write_runner(runner)
     cases = _selected(args.cases, "ORIGINAL_UPSTREAM_BASELINE_CASES", list(CASES))
-    phases = _selected(args.phases, "ORIGINAL_UPSTREAM_BASELINE_PHASES", ["cold", "warm"])
+    phases = _selected(
+        args.phases, "ORIGINAL_UPSTREAM_BASELINE_PHASES", ["cold", "warm"]
+    )
     results: List[Dict[str, Any]] = []
     for case_name in cases:
         for phase in phases:
