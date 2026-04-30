@@ -165,3 +165,25 @@ Smoke result:
 This is the first valid source-only DeepSeek baseline in the current server
 setup. It also confirms that the upstream DeepSeek path is an offloading
 baseline, not an activation-aware prefetch baseline.
+
+Formal source-only run:
+
+- root:
+  `/data/ziheng/moe_infinity_fgo_runs/original_upstream_source_baseline_v1`
+- measured requests: `16`
+- generated tokens: `256`
+- max input length: `128`
+- max new tokens: `16`
+- `device_memory_ratio`: `0.60`
+
+| Case | Phase | Decode tok/s | Decode TPOT | Prefetch calls |
+| --- | --- | ---: | ---: | ---: |
+| `upstream_readme_default` | cold | `8.916` | `112.164 ms` | `0` |
+| `upstream_readme_default` | warm | `9.099` | `109.898 ms` | `0` |
+| `upstream_prefetch_true` | cold | `8.503` | `117.604 ms` | `0` |
+| `upstream_prefetch_true` | warm | `8.849` | `113.007 ms` | `0` |
+
+The formal result confirms that setting `prefetch=true` in the open-source
+DeepSeek config does not activate `ExpertPrefetcher.prefetch_experts()`. This
+must not be used as evidence that upstream activation-aware prefetch is weak;
+it is evidence that the DeepSeek source path does not exercise that mechanism.
