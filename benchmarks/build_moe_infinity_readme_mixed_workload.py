@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
+import os
 import random
 import signal
 import statistics
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
@@ -21,6 +25,9 @@ README_DATASETS = (
     "tasksource/bigbench",
     "lukaemon/mmlu",
 )
+
+LONG_BENCH_ZIP_REPO_PATH = "datasets/THUDM/LongBench/resolve/main/data.zip"
+LONG_BENCH_DEFAULT_ZIP_URL = f"https://huggingface.co/{LONG_BENCH_ZIP_REPO_PATH}"
 
 BIGBENCH_EXCLUDE = {
     "simple_arithmetic_json_multiple_choice",
@@ -148,8 +155,19 @@ def _split_candidates() -> Sequence[str]:
 
 def _load_split(dataset_name: str, config: str | None, split: str, cache_dir: str) -> Any:
     if config:
-        return load_dataset(dataset_name, config, split=split, cache_dir=cache_dir)
-    return load_dataset(dataset_name, split=split, cache_dir=cache_dir)
+        return load_dataset(
+            dataset_name,
+            config,
+            split=split,
+            cache_dir=cache_dir,
+            trust_remote_code=True,
+        )
+    return load_dataset(
+        dataset_name,
+        split=split,
+        cache_dir=cache_dir,
+        trust_remote_code=True,
+    )
 
 
 def _load_first_available_split(
@@ -202,10 +220,140 @@ def _sample_from_loaded_dataset(
 
 
 def _load_config_names(dataset_name: str) -> List[str]:
-    configs = list(get_dataset_config_names(dataset_name))
+    configs = list(get_dataset_config_names(dataset_name, trust_remote_code=True))
     if dataset_name == "tasksource/bigbench":
         configs = [name for name in configs if name not in BIGBENCH_EXCLUDE]
     return configs
+
+
+def _mirror_url(repo_path: str, default_url: str) -> str:
+    override = os.environ.get("MOE_README_LONGBENCH_ZIP_URL", "").strip()
+    if override:
+        return override
+    endpoint = os.environ.get("HF_ENDPOINT", "").strip().rstrip("/")
+    if endpoint:
+        return f"{endpoint}/{repo_path}"
+    return default_url
+
+
+def _download_file(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+    urllib.request.urlretrieve(url, temporary)  # noqa: S310 - benchmark data URL.
+    temporary.replace(target)
+
+
+def _ensure_longbench_zip(cache_dir: str) -> tuple[Path, str]:
+    url = _mirror_url(LONG_BENCH_ZIP_REPO_PATH, LONG_BENCH_DEFAULT_ZIP_URL)
+    zip_path = (
+        Path(cache_dir)
+        / "moe_readme_downloads"
+        / "THUDM_LongBench"
+        / "data.zip"
+    )
+    if not zip_path.exists() or zip_path.stat().st_size == 0:
+        _download_file(url, zip_path)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.testzip()
+    except zipfile.BadZipFile:
+        zip_path.unlink(missing_ok=True)
+        _download_file(url, zip_path)
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.testzip()
+    return zip_path, url
+
+
+def _sample_longbench_from_zip(
+    *,
+    sample_count: int,
+    cache_dir: str,
+    rng: random.Random,
+    load_timeout_s: int,
+    config_overrides: Mapping[str, Sequence[str | None]],
+) -> tuple[List[Candidate], Dict[str, Any]]:
+    provenance: Dict[str, Any] = {
+        "dataset_name": "THUDM/LongBench",
+        "requested_count": sample_count,
+        "configs_attempted": [],
+        "errors": [],
+        "loader": "data.zip",
+    }
+    result: List[Candidate] = []
+    with _time_limit(load_timeout_s, "downloading LongBench data.zip"):
+        zip_path, data_url = _ensure_longbench_zip(cache_dir)
+    provenance["data_url"] = data_url
+    provenance["zip_path"] = str(zip_path)
+    with zipfile.ZipFile(zip_path) as archive:
+        if "THUDM/LongBench" in config_overrides:
+            configs = tuple(config_overrides["THUDM/LongBench"])
+        else:
+            configs = tuple(
+                sorted(
+                    Path(member).stem
+                    for member in archive.namelist()
+                    if member.startswith("data/") and member.endswith(".jsonl")
+                )
+            )
+            configs = list(configs)
+            rng.shuffle(configs)
+        candidates_by_config: Dict[str, List[Candidate]] = {}
+        for config in configs:
+            if config is None:
+                continue
+            config_text = str(config)
+            provenance["configs_attempted"].append(config_text)
+            member = f"data/{config_text}.jsonl"
+            try:
+                with archive.open(member) as handle:
+                    records = [json.loads(line) for line in handle if line.strip()]
+                candidates: List[Candidate] = []
+                for record in records:
+                    prompt = _prompt_from_record("THUDM/LongBench", record)
+                    if not prompt:
+                        continue
+                    candidates.append(
+                        Candidate(
+                            source_dataset="THUDM/LongBench",
+                            source_config=config_text,
+                            source_split="test",
+                            prompt=prompt,
+                            raw_fields=_jsonable(record),
+                        )
+                    )
+                rng.shuffle(candidates)
+                if candidates:
+                    candidates_by_config[config_text] = candidates
+            except Exception as exc:  # noqa: BLE001 - fail later with provenance.
+                provenance["errors"].append(
+                    {
+                        "config": config_text,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+        while len(result) < sample_count and candidates_by_config:
+            made_progress = False
+            for config_text in list(candidates_by_config):
+                candidates = candidates_by_config[config_text]
+                if not candidates:
+                    del candidates_by_config[config_text]
+                    continue
+                result.append(candidates.pop())
+                made_progress = True
+                if len(result) >= sample_count:
+                    break
+            if not made_progress:
+                break
+    provenance["loaded_count"] = len(result)
+    if len(result) < sample_count:
+        raise WorkloadBuildError(
+            f"THUDM/LongBench produced {len(result)} prompts, "
+            f"requested {sample_count}; provenance={provenance}"
+        )
+    return result[:sample_count], provenance
 
 
 def _split_config_arg(value: str) -> List[str | None]:
@@ -245,6 +393,15 @@ def _sample_dataset(
     load_timeout_s: int,
     config_overrides: Mapping[str, Sequence[str | None]],
 ) -> tuple[List[Candidate], Dict[str, Any]]:
+    if dataset_name == "THUDM/LongBench":
+        return _sample_longbench_from_zip(
+            sample_count=sample_count,
+            cache_dir=cache_dir,
+            rng=rng,
+            load_timeout_s=load_timeout_s,
+            config_overrides=config_overrides,
+        )
+
     provenance: Dict[str, Any] = {
         "dataset_name": dataset_name,
         "requested_count": sample_count,
@@ -258,7 +415,12 @@ def _sample_dataset(
     elif dataset_name == "openai/gsm8k":
         configs: Iterable[str | None] = ("main",)
     elif dataset_name == "lukaemon/mmlu":
-        configs = ("all",)
+        with _time_limit(load_timeout_s, f"loading configs for {dataset_name}"):
+            configs = _load_config_names(dataset_name)
+        if not configs:
+            raise WorkloadBuildError(f"{dataset_name} returned no configs")
+        configs = list(configs)
+        rng.shuffle(configs)
     elif dataset_name in {"THUDM/LongBench", "Muennighoff/flan", "tasksource/bigbench"}:
         with _time_limit(load_timeout_s, f"loading configs for {dataset_name}"):
             configs = _load_config_names(dataset_name)
@@ -284,7 +446,8 @@ def _sample_dataset(
                     config,
                     cache_dir,
                 )
-            needed = sample_count - len(result)
+            per_config_target = max(1, math.ceil(sample_count / max(1, len(configs))))
+            needed = min(per_config_target, sample_count - len(result))
             result.extend(
                 _sample_from_loaded_dataset(
                     dataset_name=dataset_name,
@@ -456,7 +619,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260430)
     parser.add_argument(
         "--longbench-configs",
-        default="hotpotqa,2wikimqa",
+        default="discover",
         help="Comma-separated THUDM/LongBench configs; use 'discover' for all configs.",
     )
     parser.add_argument(
@@ -466,13 +629,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bigbench-configs",
-        default="date_understanding,boolean_expressions",
+        default="discover",
         help="Comma-separated tasksource/bigbench configs; use 'discover' for all configs.",
     )
     parser.add_argument(
         "--mmlu-configs",
-        default="all",
-        help="Comma-separated lukaemon/mmlu configs.",
+        default="discover",
+        help="Comma-separated lukaemon/mmlu configs; use 'discover' for all configs.",
     )
     parser.add_argument(
         "--load-timeout-s",
@@ -486,8 +649,9 @@ def parse_args() -> argparse.Namespace:
 def _config_overrides(args: argparse.Namespace) -> Dict[str, Sequence[str | None]]:
     overrides: Dict[str, Sequence[str | None]] = {
         "Muennighoff/flan": _split_config_arg(args.flan_configs),
-        "lukaemon/mmlu": _split_config_arg(args.mmlu_configs),
     }
+    if args.mmlu_configs.strip() != "discover":
+        overrides["lukaemon/mmlu"] = _split_config_arg(args.mmlu_configs)
     if args.longbench_configs.strip() != "discover":
         overrides["THUDM/LongBench"] = _split_config_arg(args.longbench_configs)
     if args.bigbench_configs.strip() != "discover":
