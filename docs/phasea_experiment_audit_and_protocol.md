@@ -142,6 +142,11 @@ Stop adding opaque `vXX` runs for the next stage. Use named roots:
 
 - `original_workflow_parity_v1`: checks whether upstream open-source
   MoE-Infinity actually enables the prefetch path for the target model.
+  Current DeepSeek upstream-compatible smoke:
+  `/data/ziheng/moe_infinity_fgo_runs/original_workflow_parity_v1_upstream_env_check`.
+  Both README-default and `prefetch=true` cases succeed under `forward_fallback`
+  and report zero `ExpertPrefetcher` calls, so they are workflow evidence only,
+  not performance baselines.
 - `pressure_validated_retention_transfer_v1`: reruns the retention/transfer
   mechanism split with explicit pressure labels.
 - `prefetch_lifecycle_timeliness_v1`: measures enqueue, dequeue, completion,

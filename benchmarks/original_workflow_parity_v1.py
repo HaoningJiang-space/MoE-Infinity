@@ -127,6 +127,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -201,19 +203,26 @@ def main() -> None:
         torch.cuda.synchronize()
         start = time.time()
         with torch.no_grad():
-            output_ids = model.generate(
-                input_ids,
-                max_new_tokens=args.max_new_tokens,
-                min_new_tokens=args.max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            if hasattr(model.model, "generate"):
+                output_ids = model.generate(
+                    input_ids,
+                    max_new_tokens=args.max_new_tokens,
+                    min_new_tokens=args.max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+                execution_mode = "generate"
+                generated = max(int(output_ids.shape[-1] - input_ids.shape[-1]), 0)
+            else:
+                _ = model(input_ids)
+                execution_mode = "forward_fallback"
+                generated = 0
         torch.cuda.synchronize()
         elapsed_s = time.time() - start
-        generated = max(int(output_ids.shape[-1] - input_ids.shape[-1]), 0)
         result.update(
             {
                 "success": True,
+                "execution_mode": execution_mode,
                 "setup_s": setup_s,
                 "generate_s": elapsed_s,
                 "generated_tokens": generated,
@@ -239,7 +248,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 '''.lstrip()
 
 

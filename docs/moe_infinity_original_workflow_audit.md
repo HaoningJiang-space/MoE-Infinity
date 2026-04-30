@@ -88,7 +88,9 @@ Before claiming a runtime improvement over MoE-Infinity, run
 If upstream does not support the target model or does not call the prefetcher,
 the result is a workflow finding, not a performance comparison.
 
-## Current Server Smoke Result
+## Server Smoke Results
+
+### 1. Same-env import check
 
 The first upstream-only check was run at:
 
@@ -107,3 +109,32 @@ same Python environment used by `moe_infinity_fgo`. A fair upstream comparison
 requires either a compatible upstream environment or an explicit statement that
 the comparison is against the fgo open-source-derived runtime, not the upstream
 README workflow.
+
+### 2. Compatible-env upstream workflow check
+
+A second upstream-only smoke was run in an isolated environment:
+
+- env: `/data/ziheng/conda_envs/moeinf-upstream`
+- torch: `2.9.1+cu128`
+- transformers: `4.53.0`
+- upstream repo: `/data/ziheng/projects/MoE-Infinity`
+- result root:
+  `/data/ziheng/moe_infinity_fgo_runs/original_workflow_parity_v1_upstream_env_check`
+
+The upstream extension required one compile-compatibility patch in
+`core/parallel/expert_dispatcher.cpp`: several `kNumDevices` uses had to be
+changed to `kNumDevices()`. This does not change prefetch policy, but it must be
+reported as an environment compatibility patch.
+
+Because upstream DeepSeek cannot call `generate()` with the current
+Transformers interface, the probe falls back to one `forward()` pass. Therefore
+this smoke is workflow evidence only, not a latency comparison.
+
+| Case | Execution mode | Success | Prefetch API calls |
+| --- | --- | ---: | ---: |
+| `upstream_readme_default` | `forward_fallback` | yes | `0` |
+| `upstream_prefetch_flag` | `forward_fallback` | yes | `0` |
+
+This confirms the source-code audit for DeepSeek: setting `prefetch=true` in the
+open-source config does not by itself make the DeepSeek wrapper call
+`ExpertPrefetcher.prefetch_experts()`.
