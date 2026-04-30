@@ -87,3 +87,23 @@ Before claiming a runtime improvement over MoE-Infinity, run
 
 If upstream does not support the target model or does not call the prefetcher,
 the result is a workflow finding, not a performance comparison.
+
+## Current Server Smoke Result
+
+The first upstream-only check was run at:
+
+- `/data/ziheng/moe_infinity_fgo_runs/original_workflow_parity_v1_qwen_importcheck`
+
+Both `upstream_readme_default` and `upstream_prefetch_flag` fail before model
+construction in the current `mxmoe` environment:
+
+```text
+ImportError: cannot import name 'is_torch_fx_available'
+from 'transformers.utils.import_utils'
+```
+
+This means the upstream open-source workflow is not currently runnable in the
+same Python environment used by `moe_infinity_fgo`. A fair upstream comparison
+requires either a compatible upstream environment or an explicit statement that
+the comparison is against the fgo open-source-derived runtime, not the upstream
+README workflow.
