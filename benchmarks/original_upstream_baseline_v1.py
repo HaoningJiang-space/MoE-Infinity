@@ -89,6 +89,7 @@ def _env() -> Dict[str, str]:
             "TMPDIR": "/data/ziheng/tmp",
             "TEMP": "/data/ziheng/tmp",
             "TMP": "/data/ziheng/tmp",
+            "TORCH_EXTENSIONS_DIR": "/data/ziheng/torch_extensions",
         }
     )
     return env
