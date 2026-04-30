@@ -138,3 +138,30 @@ this smoke is workflow evidence only, not a latency comparison.
 This confirms the source-code audit for DeepSeek: setting `prefetch=true` in the
 open-source config does not by itself make the DeepSeek wrapper call
 `ExpertPrefetcher.prefetch_experts()`.
+
+### 3. Source-only generate baseline recovery
+
+The valid recovery path is not a custom decode loop. The source-only recovery
+uses:
+
+- upstream worktree:
+  `/data/ziheng/projects/MoE-Infinity-generate-compat`
+- upstream commit: `d617801`
+- environment:
+  `/data/ziheng/conda_envs/moeinf-upstream-generate`
+- `transformers`: `4.40.2`
+- benchmark driver:
+  `benchmarks/original_upstream_baseline_v1.py`
+- source workflow: upstream `MoE.generate()`
+
+Smoke result:
+
+- root:
+  `/data/ziheng/moe_infinity_fgo_runs/original_upstream_source_baseline_tf440_smoke`
+- cold source-only baseline: `12.39 tok/s`, `80.69 ms/token`
+- warm source-only baseline: `12.78 tok/s`, `78.26 ms/token`
+- `ExpertPrefetcher.prefetch_experts()` calls: `0`
+
+This is the first valid source-only DeepSeek baseline in the current server
+setup. It also confirms that the upstream DeepSeek path is an offloading
+baseline, not an activation-aware prefetch baseline.
