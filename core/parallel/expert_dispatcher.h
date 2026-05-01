@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -65,6 +66,8 @@ class ExpertDispatcher : public base::noncopyable {
                       std::string jit_path);
   void ClearExpertCacheCounts();
   void SetExpectedQueue(int expected_pending = 0);
+  void SetExpertGroups(const std::vector<std::tuple<int, int, int>>& groups);
+  void SetGroupAwareEviction(bool enabled);
   std::vector<std::uint64_t> GetRuntimeStats() const;
   void ResetRuntimeStats();
 
@@ -86,7 +89,9 @@ class ExpertDispatcher : public base::noncopyable {
   void OutputFunc(ExecArgs args, torch::Tensor output, torch::Tensor token_mask,
                   int gpu_id);
 
-  ExpertNodePtr FindExpertEvict(int gpu_id);
+  ExpertNodePtr FindExpertEvict(int gpu_id, int target_layer_idx,
+                                int target_expert_idx);
+  int ExpertGroupId(int layer_idx, int expert_idx) const;
   void WaitForPendingZero(const char* caller);
   std::string ActiveExecDebugString() const;
   std::string ActiveFetchDebugString() const;
@@ -131,9 +136,13 @@ class ExpertDispatcher : public base::noncopyable {
   std::atomic<std::uint64_t> demand_candidate_protect_fallback_count_{0};
   std::atomic<std::uint64_t> candidate_resident_hit_count_{0};
   std::atomic<std::uint64_t> candidate_demand_miss_count_{0};
+  std::atomic<std::uint64_t> group_protect_skip_count_{0};
+  std::atomic<std::uint64_t> group_protect_fallback_count_{0};
   std::atomic<std::uint64_t> current_expected_{0};
   std::atomic<std::uint64_t> current_enqueued_{0};
   std::atomic<std::uint64_t> current_output_{0};
+  std::atomic<bool> group_aware_eviction_enabled_{false};
+  std::vector<std::vector<int>> expert_group_ids_;
   std::vector<std::atomic<std::int64_t>> active_exec_layer_;
   std::vector<std::atomic<std::int64_t>> active_exec_expert_;
   std::vector<std::atomic<std::uint64_t>> active_exec_start_us_;

@@ -6,6 +6,7 @@
 import functools
 import gc
 import importlib
+import csv
 import json
 import os
 import re
@@ -54,6 +55,35 @@ from moe_infinity.utils.arguments import (
 _prefetch_lib = None
 # Alias for compatibility
 prefetch_op = None
+
+
+def _load_expert_group_assignments(path, group_size):
+    if not path:
+        return []
+    group_size = int(group_size)
+    assignments = []
+    seen = set()
+    with open(path, "r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"layer", "group_size", "group_id", "experts"}
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"expert page group file {path!r} missing fields {sorted(missing)}"
+            )
+        for row in reader:
+            if int(row["group_size"]) != group_size:
+                continue
+            layer_idx = int(row["layer"])
+            group_id = int(row["group_id"])
+            for expert_text in row["experts"].split():
+                expert_idx = int(expert_text)
+                key = (layer_idx, expert_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                assignments.append((layer_idx, expert_idx, group_id))
+    return assignments
 
 
 def _optional_model_attr(module_name: str, attr_name: str):
@@ -688,6 +718,31 @@ class OffloadEngine(object):
                     parse_expert_type(self.config),
                     self.archer_config.num_threads,
                 )
+                group_path = str(
+                    getattr(self.archer_config, "expert_page_group_path", "") or ""
+                )
+                group_aware_eviction = bool(
+                    getattr(
+                        self.archer_config,
+                        "expert_page_group_aware_eviction",
+                        False,
+                    )
+                )
+                if group_path:
+                    group_size = int(
+                        getattr(self.archer_config, "expert_page_group_size", 8)
+                    )
+                    assignments = _load_expert_group_assignments(
+                        group_path, group_size
+                    )
+                    if assignments and hasattr(
+                        self.expert_dispatcher, "set_expert_groups"
+                    ):
+                        self.expert_dispatcher.set_expert_groups(assignments)
+                    if hasattr(self.expert_dispatcher, "set_group_aware_eviction"):
+                        self.expert_dispatcher.set_group_aware_eviction(
+                            bool(group_aware_eviction and assignments)
+                        )
 
                 for name, param in model.named_parameters(recurse=True):
                     # remove base_model_prefix from self.name_id_map

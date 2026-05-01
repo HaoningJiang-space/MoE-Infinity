@@ -80,7 +80,7 @@ def dispatcher_stats_dict(stats: Sequence[int] | None) -> Dict[str, int]:
     if not stats:
         return {}
     values = list(stats)
-    if len(values) not in {4, 11, 18, 20, 24}:
+    if len(values) not in {4, 11, 18, 20, 24, 26}:
         raise ValueError(f"Unexpected dispatcher stats payload: {values}")
     result = {
         "enqueue_count": int(values[0]),
@@ -126,6 +126,13 @@ def dispatcher_stats_dict(stats: Sequence[int] | None) -> Dict[str, int]:
                 "demand_candidate_protect_fallback_count": int(values[21]),
                 "candidate_resident_hit_count": int(values[22]),
                 "candidate_demand_miss_count": int(values[23]),
+            }
+        )
+    if len(values) >= 26:
+        result.update(
+            {
+                "group_protect_skip_count": int(values[24]),
+                "group_protect_fallback_count": int(values[25]),
             }
         )
     return result

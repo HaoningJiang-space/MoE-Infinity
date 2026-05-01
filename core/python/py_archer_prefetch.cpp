@@ -98,6 +98,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<ExpertDispatcher>(m, "expert_dispatcher")
       .def(py::init<int, int, int, int, int>())
       .def("register_expert", &ExpertDispatcher::RegisterExpert)
+      .def("set_expert_groups", &ExpertDispatcher::SetExpertGroups)
+      .def("set_group_aware_eviction",
+           &ExpertDispatcher::SetGroupAwareEviction)
       .def("enqueue_expert", &ExpertDispatcher::EnqueueExpert)
       .def("set_inputs", &ExpertDispatcher::SetInputs)
       .def("set_expected_queue", &ExpertDispatcher::SetExpectedQueue)

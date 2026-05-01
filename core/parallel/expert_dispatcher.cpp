@@ -131,8 +131,10 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
 
   for (int i = 0; i < num_experts; ++i) {
     experts_.emplace_back();
+    expert_group_ids_.emplace_back();
     for (int j = 0; j < num_layers; ++j) {
       experts_[i].emplace_back();
+      expert_group_ids_[i].push_back(-1);
       experts_[i][j] = std::make_shared<ExpertNode>();
       experts_[i][j]->expert_type = expert_type;
       int expert_type = expert_type_;
@@ -165,6 +167,40 @@ ExpertDispatcher::ExpertDispatcher(int num_experts, int num_layers, int dtype,
       experts_[i][j]->expert_idx = i;
     }
   }
+}
+
+void ExpertDispatcher::SetExpertGroups(
+    const std::vector<std::tuple<int, int, int>>& groups) {
+  for (const auto& group : groups) {
+    int layer_idx = std::get<0>(group);
+    int expert_idx = std::get<1>(group);
+    int group_id = std::get<2>(group);
+    if (expert_idx < 0 ||
+        expert_idx >= static_cast<int>(expert_group_ids_.size())) {
+      continue;
+    }
+    if (layer_idx < 0 ||
+        layer_idx >= static_cast<int>(expert_group_ids_[expert_idx].size())) {
+      continue;
+    }
+    expert_group_ids_[expert_idx][layer_idx] = group_id;
+  }
+}
+
+void ExpertDispatcher::SetGroupAwareEviction(bool enabled) {
+  group_aware_eviction_enabled_.store(enabled, std::memory_order_release);
+}
+
+int ExpertDispatcher::ExpertGroupId(int layer_idx, int expert_idx) const {
+  if (expert_idx < 0 ||
+      expert_idx >= static_cast<int>(expert_group_ids_.size())) {
+    return -1;
+  }
+  if (layer_idx < 0 ||
+      layer_idx >= static_cast<int>(expert_group_ids_[expert_idx].size())) {
+    return -1;
+  }
+  return expert_group_ids_[expert_idx][layer_idx];
 }
 
 void ExpertDispatcher::SetExpectedQueue(int expected_pending) {
@@ -340,6 +376,8 @@ std::vector<std::uint64_t> ExpertDispatcher::GetRuntimeStats() const {
       demand_candidate_protect_fallback_count_.load(),
       candidate_resident_hit_count_.load(),
       candidate_demand_miss_count_.load(),
+      group_protect_skip_count_.load(),
+      group_protect_fallback_count_.load(),
   };
 }
 
@@ -368,6 +406,8 @@ void ExpertDispatcher::ResetRuntimeStats() {
   demand_candidate_protect_fallback_count_.store(0);
   candidate_resident_hit_count_.store(0);
   candidate_demand_miss_count_.store(0);
+  group_protect_skip_count_.store(0);
+  group_protect_fallback_count_.store(0);
   current_expected_.store(0);
   current_enqueued_.store(0);
   current_output_.store(0);
@@ -471,15 +511,22 @@ void ExpertDispatcher::ResetExpertCacheState() {
 //   }
 // }
 
-ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
+ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id,
+                                                int target_layer_idx,
+                                                int target_expert_idx) {
   uint64_t min_visit_count = INT_MAX;
   ExpertNodePtr evict_expert_node = nullptr;
   bool skipped_candidate = false;
+  bool skipped_group = false;
   const bool protect_candidates =
       kTaskPool != nullptr &&
       kTaskPool->CandidateDemandEvictionProtectionEnabled();
+  const bool protect_group =
+      group_aware_eviction_enabled_.load(std::memory_order_acquire);
+  const int target_group =
+      protect_group ? ExpertGroupId(target_layer_idx, target_expert_idx) : -1;
 
-  auto scan = [&](bool allow_candidates) {
+  auto scan = [&](bool allow_candidates, bool allow_same_group) {
     for (auto& key : cached_experts_[gpu_id]) {
       auto layer_idx = key >> 32;
       auto expert_idx = key & 0xFFFFFFFF;
@@ -489,6 +536,14 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
           kTaskPool->IsCacheCandidate(node)) {
         skipped_candidate = true;
         demand_candidate_protect_skip_count_.fetch_add(1);
+        continue;
+      }
+      if (!allow_same_group && target_group >= 0 &&
+          static_cast<int>(layer_idx) == target_layer_idx &&
+          ExpertGroupId(static_cast<int>(layer_idx),
+                        static_cast<int>(expert_idx)) == target_group) {
+        skipped_group = true;
+        group_protect_skip_count_.fetch_add(1);
         continue;
       }
       if (node->device.is_cuda() &&
@@ -502,10 +557,14 @@ ExpertNodePtr ExpertDispatcher::FindExpertEvict(int gpu_id) {
     }
   };
 
-  scan(/*allow_candidates=*/false);
+  scan(/*allow_candidates=*/false, /*allow_same_group=*/false);
   if (evict_expert_node == nullptr && skipped_candidate) {
     demand_candidate_protect_fallback_count_.fetch_add(1);
-    scan(/*allow_candidates=*/true);
+    scan(/*allow_candidates=*/true, /*allow_same_group=*/false);
+  }
+  if (evict_expert_node == nullptr && skipped_group) {
+    group_protect_fallback_count_.fetch_add(1);
+    scan(/*allow_candidates=*/true, /*allow_same_group=*/true);
   }
   return evict_expert_node;
 }
@@ -616,7 +675,8 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
       } else {
         // find the expert in gpu and min incache_visit_count
         active_fetch_stage_[gpu_id].store(3, std::memory_order_release);
-        ExpertNodePtr evict_expert_node = FindExpertEvict(gpu_id);
+        ExpertNodePtr evict_expert_node =
+            FindExpertEvict(gpu_id, layer_idx, expert_idx);
         while (evict_expert_node == nullptr && !main_thread_stop_flag_.load()) {
           all_locked_event_count_.fetch_add(1);
           no_victim_wait_count_.fetch_add(1);
@@ -640,7 +700,7 @@ void ExpertDispatcher::GPUFetchFunc(int gpu_id) {
               static_cast<std::uint64_t>(no_victim_wait_us);
           no_victim_wait_total_us_.fetch_add(no_victim_wait_us_u64);
           RecordAtomicMax(no_victim_wait_max_us_, no_victim_wait_us_u64);
-          evict_expert_node = FindExpertEvict(gpu_id);
+          evict_expert_node = FindExpertEvict(gpu_id, layer_idx, expert_idx);
         }
         // auto num_layers = experts_[0].size();
         // auto num_experts = experts_.size();
